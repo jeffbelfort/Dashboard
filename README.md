@@ -35,7 +35,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 Then try again.
 
-**3. Set your location**
+**3. Set your location** (or you can just use the settings button on the widget app you dont really need to do this part)
 
 Open `backend/src/config.ts` in any text editor and change the city, latitude and longitude to yours. Find your coordinates at [latlong.net](https://latlong.net).
 
