@@ -706,7 +706,15 @@ function AddWidgetPanel({ visible, onAdd, onClose }: {
 export default function Dashboard() {
   const [metrics, setMetrics] = useState<Metrics|null>(null);
   const [connected, setConnected] = useState(false);
-  const [settings, setSettings] = useState<DashSettings>(DEFAULT_SETTINGS);
+  const [mounted, setMounted] = useState(false);
+  const [settings, setSettings] = useState<DashSettings>(() => {
+    if (typeof window === 'undefined') return DEFAULT_SETTINGS;
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return DEFAULT_SETTINGS;
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [showAddWidget, setShowAddWidget] = useState(false);
   const [dragging, setDragging] = useState<string|null>(null);
@@ -725,14 +733,6 @@ export default function Dashboard() {
   }, []);
 
   const currentPage = settings.pages[settings.currentPage] ?? settings.pages[0];
-
-  // Load saved settings
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) setSettings(JSON.parse(saved));
-    } catch {}
-  }, []);
 
   // Save settings
   const saveSettings = useCallback((s: DashSettings) => {
@@ -803,6 +803,9 @@ export default function Dashboard() {
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [showAddWidget]);
+
+  // Set mounted after hydration
+  useEffect(() => { setMounted(true); }, []);
 
   const updateCurrentPage = useCallback((updates: Partial<PageConfig>) => {
     saveSettings({
@@ -911,7 +914,7 @@ export default function Dashboard() {
 
         {/* Grid */}
         <div style={{ flex:1, overflow:'auto', padding:'10px' }} ref={containerRef}>
-          <GridLayout
+          {mounted && <GridLayout
             layout={activeLayout}
             cols={12}
             rowHeight={30}
@@ -932,7 +935,7 @@ export default function Dashboard() {
                 </Card>
               </div>
             ))}
-          </GridLayout>
+          </GridLayout>}
         </div>
 
         {/* Page dots */}
