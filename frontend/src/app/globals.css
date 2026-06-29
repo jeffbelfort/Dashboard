@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-mono), 'Courier New', monospace;
+  background: #0a0c0a;
+  color: #c8d8c0;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0c0a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a3a2a;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a6a4a;
+}
