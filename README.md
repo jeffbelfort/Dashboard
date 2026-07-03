@@ -1,76 +1,96 @@
 # SYS.MONITOR
 
-A self-hosted real-time system monitoring dashboard with a dark terminal aesthetic. Built with Node.js, WebSockets, and Next.js.
+A self-hosted real-time system monitoring dashboard with a dark terminal aesthetic. Built with Node.js, WebSockets, Next.js, and direct HWiNFO hardware integration.
 
-![Dashboard](https://img.shields.io/badge/status-active-4ade80?style=flat-square&labelColor=0a0c0a)
+![status](https://img.shields.io/badge/status-active-brightgreen)
 
 ## Features
 
-- Live CPU load with per-core breakdown and history graph
-- Memory usage with history graph
-- GPU stats — load, VRAM, temperature (NVIDIA/AMD)
-- Disk usage per drive
-- Top processes by CPU
-- Docker container stats — CPU, memory per container
-- Network interface stats
-- Weather widget with configurable location
-- Multi-page layout with auto-rotation
-- Fully draggable and resizable widgets
-- Layout saves automatically per page
+- **Live CPU monitoring** — overall load, per-core breakdown, per-core temperatures (P-cores + E-cores)
+- **GPU stats** — load, temperature, power draw, VRAM usage, clock speeds (via HWiNFO shared memory)
+- **Memory usage** with history graph
+- **Disk usage** per drive
+- **Top processes** by CPU and memory, sortable
+- **Docker container stats** — CPU, memory per container
+- **Network interface stats** — real-time upload/download speeds
+- **Spotify integration** — now-playing widget with playback controls
+- **Weather widget** with configurable location
+- **Threshold-based alerts** — CPU/GPU load, temps, disk usage
+- **Multi-page layout** with auto-rotation
+- **Fully draggable and resizable widgets** — layout saves automatically per page
+- **Guided setup wizard** — no manual config editing required
 
-## Requirements
+## Why HWiNFO?
 
-- [Node.js](https://nodejs.org) v18 or higher — just install it and come back
-- Docker Desktop (optional — dashboard works fine without it)
+Windows' built-in sensor APIs (WMI) are unreliable for GPU power draw, fan speeds, and often CPU temperature. SYS.MONITOR reads directly from **HWiNFO's shared memory** via a lightweight Python reader, giving accurate sensor data without CSV logging or extra background services eating disk I/O.
 
-## Setup
+## Getting Started
 
-**1. Download and extract the project**
+### Requirements
+- [Node.js](https://nodejs.org) 18+
+- [Python](https://python.org) 3.9+ (for HWiNFO sensor reading)
+- [HWiNFO64](https://www.hwinfo.com/download/) with **Shared Memory Support** enabled (Settings → General/User Interface)
 
-**2. Right click `setup.ps1` and click "Run with PowerShell"**
+### Setup
 
-This installs everything automatically. If it errors saying scripts are blocked, open PowerShell and run:
+1. Clone the repo
+2. Run `setup.ps1` from the project root and choose **[1] First time setup**
+   - Installs backend and frontend dependencies
+   - Builds the production frontend
+3. Run `setup.ps1` again and choose **[2] Start dashboard**
+   - Starts backend and frontend, opens your browser automatically
+4. On first launch you'll land on the **setup wizard** — configure your location, Spotify (optional), and alert thresholds through the UI
+5. Dashboard loads at `http://127.0.0.1:3002`
+
+### HWiNFO Setup
+1. Open HWiNFO64 → Settings (gear icon)
+2. Go to **General/User Interface**
+3. Enable **Shared Memory Support**
+4. Restart HWiNFO
+   
+> Note: the free version of HWiNFO limits Shared Memory Support to 12-hour sessions — restart HWiNFO periodically, or use a licensed copy to remove the limit.
+
+### Spotify Setup (optional)
+1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+2. Set the redirect URI to `http://127.0.0.1:3001/callback`
+3. Enter your Client ID and Secret during the setup wizard
+4. After setup, visit `http://127.0.0.1:3001/spotify/auth` to connect your account
+
+## Project Structure
+
 ```
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
-Then try again.
-
-**3. Set your location**
-
-Open `backend/src/config.ts` in any text editor and change the city, latitude and longitude to yours. Find your coordinates at [latlong.net](https://latlong.net).
-
-**4. Start the dashboard**
-
-Open two terminal windows (PowerShell or Command Prompt) in the project folder:
-
-Terminal 1:
-```
-cd backend
-npx ts-node-dev --respawn src/index.ts
-```
-
-Terminal 2:
-```
-cd frontend
-npm run dev
+project/
+├── backend/
+│   ├── src/
+│   │   ├── collectors/       # Individual metric collectors (CPU, GPU, disk, etc.)
+│   │   ├── hwinfo_reader.py  # Persistent HWiNFO shared memory reader
+│   │   ├── config.ts         # Your config (gitignored)
+│   │   ├── config.template.ts
+│   │   ├── setup.ts          # Setup wizard backend logic
+│   │   ├── db.ts             # Metric history storage
+│   │   └── index.ts          # WebSocket server + metrics loop
+│   └── package.json
+├── frontend/
+│   ├── src/
+│   │   └── app/
+│   │       ├── page.tsx      # Main dashboard
+│   │       └── setup/        # Setup wizard UI
+│   └── package.json
+└── setup.ps1                 # Install / build / launch script
 ```
 
-**5. Open your browser and go to http://127.0.0.1:3002**
+## Architecture Notes
 
-That's it.
+- **Single shared metrics loop** — one collection cycle serves all connected clients, not one per browser tab
+- **Per-collector throttling** — expensive Windows WMI calls (CPU load, network, disk, process list) are rate-limited independently to keep system overhead minimal; the loop pauses entirely when no dashboard is open
+- **In-memory history** — no database setup required; metrics persist for the current session
 
-## Usage
+## Configuration
 
-- **Move widgets** — drag by the header bar
-- **Resize widgets** — drag the corner handle
-- **Hide a widget** — hover it and click ✕
-- **Add a widget back** — click `+` in the top right
-- **Switch pages** — click the page tabs in the header
-- **Settings** — click ⚙ top right to manage pages and set auto-rotation speed
-- **Change weather location** — click ⚙ inside the weather widget, no restart needed
+All configuration is done through the setup wizard on first run. Your config, including any credentials, is saved to `backend/src/config.ts`, which is gitignored and never leaves your machine.
 
-## Stack
+To re-run setup, delete `backend/src/config.ts` and restart the backend.
 
-- **Backend** — Node.js, TypeScript, `ws`, `systeminformation`, `dockerode`
-- **Frontend** — Next.js, React, `react-grid-layout`, `recharts`
-- **Weather** — [Open-Meteo](https://open-meteo.com) (free, no API key needed)
+## License
+
+Personal project — use, fork, and modify freely.
