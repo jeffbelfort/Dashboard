@@ -1,33 +1,64 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
-import GridLayout, { Layout } from 'react-grid-layout';
+import { useEffect, useState, useCallback, useRef, memo } from 'react';
+import { useRouter } from 'next/navigation';
+import GridLayout from 'react-grid-layout';
+const Grid = GridLayout as any;
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
 
+
 // ── Types ──────────────────────────────────────────────────────────────────
 interface CpuData { load: number; cores: number[]; }
+interface CpuTempData { main: number | null; cores: number[]; max: number | null; }
+interface FanData { fan: number; rpm: number; }
 interface MemData { used: number; total: number; percent: number; }
-interface GpuData { model: string; load: number; memUsed: number; memTotal: number; memPercent: number; temp: number; }
+interface GpuData { model: string; load: number; memUsed: number; memTotal: number; memPercent: number; temp: number; powerDraw: number | null; powerLimit: number | null; }
 interface DiskData { mount: string; type: string; used: number; size: number; percent: number; }
 interface ProcessData { name: string; cpu: number; mem: number; pid: number; }
 interface ContainerStat { name: string; cpu: number; memory: number; memUsed: number; memLimit: number; status: string; }
 interface NetworkIface { iface: string; rxSec: number; txSec: number; rxTotal: number; txTotal: number; }
 interface WeatherData { city?: string; temp: number; feelsLike: number; humidity: number; windspeed: number; weatherCode: number; description: string; }
+interface SpotifyData { isPlaying: boolean; title: string | null; artist: string | null; album: string | null; albumArt: string | null; progressMs: number; durationMs: number; progressPercent: number; }
+interface AlertData { type: string; value: number; threshold: number; message: string; }
+interface HwinfoData {
+  available: boolean;
+  cpu: {
+    tempAvg: number | null;
+    packageTemp: number | null;
+    power: number | null;
+    coreTemps: { label: string; temp: number }[];
+  };
+  gpu: {
+    temp: number | null;
+    memJunctionTemp: number | null;
+    load: number | null;
+    memLoad: number | null;
+    memUsagePct: number | null;
+    clockMhz: number | null;
+    memClockMhz: number | null;
+    power: number | null;
+    fanRpm: number | null;
+    fanPct: number | null;
+  };
+  fans: { cpuFanRpm: number | null };
+}
+
 interface Metrics {
   cpu: CpuData; mem: MemData; gpu: GpuData | null; disk: DiskData[];
   processes: ProcessData[]; docker: ContainerStat[]; network: NetworkIface[];
-  weather: WeatherData | null; timestamp: number;
+  weather: WeatherData | null; cpuTemp: CpuTempData; fans: FanData[];
+  spotify: SpotifyData | null; alerts: AlertData[]; hwinfo: HwinfoData | null; timestamp: number;
 }
-interface HistoryPoint { t: number; cpu: number; mem: number; gpuLoad: number; gpuTemp: number; }
+interface HistoryPoint { t: number; cpu: number; mem: number; gpuLoad: number; gpuTemp: number; cpuTemp: number; }
 
-type WidgetKey = 'clock' | 'weather' | 'cpu' | 'cpuGraph' | 'memory' | 'memGraph' | 'gpu' | 'gpuGraph' | 'disk' | 'processes' | 'network' | 'docker';
+type WidgetKey = 'clock' | 'weather' | 'cpu' | 'cpuGraph' | 'memory' | 'memGraph' | 'gpu' | 'gpuGraph' | 'disk' | 'processes' | 'network' | 'docker' | 'spotify' | 'temps' | 'alerts' | 'hwinfo';
 
 interface PageConfig {
   id: string;
   name: string;
-  layout: Layout[];
+  layout: any[];
   visible: Record<WidgetKey, boolean>;
 }
 
@@ -35,7 +66,7 @@ interface DashSettings {
   pages: PageConfig[];
   currentPage: number;
   autoRotate: boolean;
-  rotateInterval: number; // seconds
+  rotateInterval: number;
 }
 
 // ── Palette ────────────────────────────────────────────────────────────────
@@ -46,6 +77,7 @@ const C = {
   amber: '#fbbf24', amberDim: '#c8a850',
   purple: '#a78bfa', purpleDim: '#7a6ab0',
   pink: '#f472b6', blue: '#38bdf8', red: '#ef4444', orange: '#fb923c',
+  cyan: '#22d3ee',
   text: '#c8d8c0', textMuted: '#5a7a5a',
 };
 
@@ -57,10 +89,10 @@ const WEATHER_ICONS: Record<number, string> = {
 
 const IGNORED_IFACES = ['loopback','lo','docker','veth','br-','virbr'];
 const IGNORED_PROCS = ['system idle process', 'idle'];
-const STORAGE_KEY = 'sysmonitor-v5';
+const STORAGE_KEY = 'sysmonitor-v6';
 const HISTORY_LEN = 60;
 
-const ALL_WIDGETS: WidgetKey[] = ['clock','weather','cpu','cpuGraph','memory','memGraph','gpu','gpuGraph','disk','processes','network','docker'];
+const ALL_WIDGETS: WidgetKey[] = ['clock','weather','cpu','cpuGraph','memory','memGraph','gpu','gpuGraph','disk','processes','network','docker','spotify','temps','alerts','hwinfo'];
 
 const WIDGET_META: Record<WidgetKey, { label: string; accent: string }> = {
   clock:    { label: 'CLOCK',      accent: C.greenDim },
@@ -75,6 +107,10 @@ const WIDGET_META: Record<WidgetKey, { label: string; accent: string }> = {
   processes:{ label: 'PROCESSES',  accent: C.amber },
   network:  { label: 'NETWORK',    accent: C.blue },
   docker:   { label: 'DOCKER',     accent: C.pink },
+  spotify:  { label: 'SPOTIFY',    accent: C.cyan },
+  temps:    { label: 'TEMPS & FANS', accent: C.red },
+  alerts:   { label: 'ALERTS',     accent: C.red },
+  hwinfo:   { label: 'HWINFO',      accent: C.cyan },
 };
 
 const makeDefaultVisible = (on: WidgetKey[]): Record<WidgetKey, boolean> =>
@@ -102,8 +138,12 @@ const DEFAULT_PAGE_2: PageConfig = {
     { i: 'memGraph', x: 6, y: 0, w: 6, h: 6, minW:2, minH:3 },
     { i: 'gpuGraph', x: 0, y: 6, w: 6, h: 6, minW:2, minH:3 },
     { i: 'network',  x: 6, y: 6, w: 6, h: 6, minW:2, minH:3 },
+    { i: 'temps',    x: 0, y: 12, w: 4, h: 6, minW:2, minH:3 },
+    { i: 'spotify',  x: 4, y: 12, w: 4, h: 6, minW:2, minH:3 },
+    { i: 'alerts',   x: 8, y: 12, w: 4, h: 6, minW:2, minH:3 },
+    { i: 'hwinfo',   x: 0, y: 18, w: 6, h: 8, minW:2, minH:3 },
   ],
-  visible: makeDefaultVisible(['cpuGraph','memGraph','gpuGraph','network']),
+  visible: makeDefaultVisible(['cpuGraph','memGraph','gpuGraph','network','temps','spotify','alerts','hwinfo']),
 };
 
 const DEFAULT_SETTINGS: DashSettings = {
@@ -117,6 +157,7 @@ const DEFAULT_SETTINGS: DashSettings = {
 const fmtBytes = (b: number) => b >= 1073741824 ? `${(b/1073741824).toFixed(1)} GB` : `${(b/1048576).toFixed(0)} MB`;
 const fmtSpeed = (b: number) => b >= 1048576 ? `${(b/1048576).toFixed(1)} MB/s` : b >= 1024 ? `${(b/1024).toFixed(1)} KB/s` : `${Math.round(b)} B/s`;
 const fmtTotal = (b: number) => b >= 1073741824 ? `${(b/1073741824).toFixed(2)} GB` : b >= 1048576 ? `${(b/1048576).toFixed(1)} MB` : `${(b/1024).toFixed(0)} KB`;
+const fmtMs = (ms: number) => { const s = Math.floor(ms/1000); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
 const loadColor = (p: number) => p < 60 ? C.green : p < 80 ? C.amber : C.red;
 const tempColor = (t: number) => t < 60 ? C.green : t < 80 ? C.amber : C.red;
 
@@ -171,8 +212,8 @@ function Bar({ value, label, color }: { value:number; label?:string; color?:stri
 }
 
 // ── Card ───────────────────────────────────────────────────────────────────
-function Card({ title, accent=C.green, children, onClose, isDragging }: {
-  title:string; accent?:string; children:React.ReactNode; onClose?:()=>void; isDragging?:boolean;
+function Card({ title, accent=C.green, children, onClose, isDragging, flash }: {
+  title:string; accent?:string; children:React.ReactNode; onClose?:()=>void; isDragging?:boolean; flash?:boolean;
 }) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -180,10 +221,12 @@ function Card({ title, accent=C.green, children, onClose, isDragging }: {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        background:C.bgCard, border:`1px solid ${isDragging ? accent : hovered ? C.borderMid : C.border}`,
+        background:C.bgCard,
+        border:`1px solid ${isDragging ? accent : flash ? C.red : hovered ? C.borderMid : C.border}`,
         height:'100%', display:'flex', flexDirection:'column',
         transition:'border-color 0.15s', boxSizing:'border-box',
-        boxShadow: isDragging ? `0 0 20px ${accent}15` : 'none', overflow:'hidden',
+        boxShadow: flash ? `0 0 12px ${C.red}30` : isDragging ? `0 0 20px ${accent}15` : 'none',
+        overflow:'hidden',
       }}>
       <div className="drag-handle" style={{
         display:'flex', alignItems:'center', justifyContent:'space-between',
@@ -191,8 +234,9 @@ function Card({ title, accent=C.green, children, onClose, isDragging }: {
         cursor:'grab', userSelect:'none', flexShrink:0,
       }}>
         <div style={{ display:'flex', alignItems:'center', gap:'7px' }}>
-          <div style={{ width:'2px', height:'12px', background:accent, flexShrink:0 }}/>
-          <span style={{ fontSize:'9px', letterSpacing:'0.2em', textTransform:'uppercase', color:accent, fontFamily:'monospace' }}>{title}</span>
+          <div style={{ width:'2px', height:'12px', background: flash ? C.red : accent, flexShrink:0 }}/>
+          <span style={{ fontSize:'9px', letterSpacing:'0.2em', textTransform:'uppercase', color: flash ? C.red : accent, fontFamily:'monospace' }}>{title}</span>
+          {flash && <span style={{ fontSize:'8px', color:C.red, fontFamily:'monospace', animation:'pulse 1s infinite' }}>⚠</span>}
         </div>
         <button
           onClick={e => { e.stopPropagation(); onClose?.(); }}
@@ -394,15 +438,25 @@ function GpuContent({ data }: { data:GpuData|null }) {
       <div style={{ fontSize:'9px', color:C.orange, letterSpacing:'0.06em', fontFamily:'monospace', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{data.model}</div>
       <div style={{ display:'flex', gap:'10px', alignItems:'center' }}>
         <Gauge value={data.load} color={C.orange} label="LOAD" size={68}/>
-        <div style={{ flex:1, display:'flex', flexDirection:'column', gap:'8px' }}>
+        <div style={{ flex:1, display:'flex', flexDirection:'column', gap:'6px' }}>
           <div>
-            <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>VRAM</div>
-            <div style={{ fontSize:'11px', color:C.orange, fontFamily:'monospace' }}>{fmtBytes(data.memUsed)} / {fmtBytes(data.memTotal)}</div>
+            <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>VRAM USAGE</div>
+            <div style={{ fontSize:'11px', color:C.orange, fontFamily:'monospace' }}>{data.memPercent.toFixed(1)}%</div>
             <Bar value={data.memPercent} color={C.orange}/>
           </div>
-          <div>
-            <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>TEMP</div>
-            <div style={{ fontSize:'18px', color:tempColor(data.temp), fontFamily:'monospace', lineHeight:1 }}>{data.temp}°C</div>
+          <div style={{ display:'flex', gap:'12px' }}>
+            <div>
+              <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>TEMP</div>
+              <div style={{ fontSize:'16px', color:tempColor(data.temp), fontFamily:'monospace', lineHeight:1 }}>{data.temp.toFixed(1)}°C</div>
+            </div>
+            {data.powerDraw != null && (
+              <div>
+                <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>POWER</div>
+                <div style={{ fontSize:'14px', color:C.amber, fontFamily:'monospace', lineHeight:1 }}>
+                  {data.powerDraw.toFixed(1)}W{data.powerLimit ? `/${data.powerLimit.toFixed(0)}W` : ''}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -448,12 +502,19 @@ function DiskContent({ data }: { data:DiskData[] }) {
 }
 
 function ProcessContent({ data }: { data:ProcessData[] }) {
-  const filtered = data.filter(p=>!IGNORED_PROCS.includes(p.name.toLowerCase()));
+  const [sortBy, setSortBy] = useState<'cpu'|'mem'>('cpu');
+  const filtered = data
+    .filter(p=>!IGNORED_PROCS.includes(p.name.toLowerCase()))
+    .sort((a,b) => sortBy === 'cpu' ? b.cpu - a.cpu : b.mem - a.mem);
   if (!filtered.length) return <div style={{ textAlign:'center', color:C.greenMuted, fontSize:'10px', fontFamily:'monospace' }}>NO DATA</div>;
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'0px', height:'100%', overflow:'hidden' }}>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 50px 50px 42px', gap:'4px', marginBottom:'4px', paddingBottom:'4px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
-        {['PROCESS','CPU','MEM','PID'].map(h=><span key={h} style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>{h}</span>)}
+        <span style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>PROCESS</span>
+        {(['CPU','MEM'] as const).map(h=>(
+          <span key={h} onClick={()=>setSortBy(h.toLowerCase() as 'cpu'|'mem')} style={{ fontSize:'8px', color:sortBy===h.toLowerCase()?C.amber:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace', cursor:'pointer', textDecoration:sortBy===h.toLowerCase()?'underline':'none' }}>{h}▼</span>
+        ))}
+        <span style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>PID</span>
       </div>
       {filtered.slice(0,10).map((p,i)=>(
         <div key={p.pid} style={{ display:'grid', gridTemplateColumns:'1fr 50px 50px 42px', gap:'4px', padding:'2px 0', borderBottom:`1px solid ${C.greenFaint}` }}>
@@ -510,6 +571,219 @@ function DockerContent({ data }: { data:ContainerStat[]|null }) {
   );
 }
 
+// ── NEW: Spotify Widget ─────────────────────────────────────────────────────
+function SpotifyContent({ data, onSendMessage }: { data: SpotifyData | null; onSendMessage: (msg: object) => void }) {
+  const ctrl = (action: string) => onSendMessage({ type: 'spotifyControl', action });
+
+  if (!data) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'10px' }}>
+      <div style={{ fontSize:'10px', color:C.greenMuted, fontFamily:'monospace', textAlign:'center' }}>SPOTIFY NOT CONNECTED</div>
+      <a href="http://127.0.0.1:3001/spotify/auth" target="_blank" rel="noreferrer"
+        style={{ fontSize:'9px', color:C.cyan, border:`1px solid ${C.cyan}`, padding:'4px 10px', textDecoration:'none', fontFamily:'monospace', letterSpacing:'0.1em' }}>
+        CONNECT SPOTIFY
+      </a>
+    </div>
+  );
+
+  if (!data.isPlaying && !data.title) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%' }}>
+      <div style={{ fontSize:'10px', color:C.greenMuted, fontFamily:'monospace' }}>NOTHING PLAYING</div>
+    </div>
+  );
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', height:'100%', gap:'8px' }}>
+      <div style={{ display:'flex', gap:'10px', alignItems:'flex-start' }}>
+        {data.albumArt && (
+          <img src={data.albumArt} alt="album" style={{ width:'52px', height:'52px', flexShrink:0, border:`1px solid ${C.border}` }}/>
+        )}
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:'10px', color:C.text, fontFamily:'monospace', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{data.title}</div>
+          <div style={{ fontSize:'9px', color:C.cyan, fontFamily:'monospace', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', marginTop:'2px' }}>{data.artist}</div>
+          <div style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', marginTop:'1px' }}>{data.album}</div>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div>
+        <div style={{ width:'100%', height:'3px', background:C.greenFaint, marginBottom:'4px' }}>
+          <div style={{ height:'100%', width:`${data.progressPercent}%`, background:C.cyan, transition:'width 1s linear' }}/>
+        </div>
+        <div style={{ display:'flex', justifyContent:'space-between' }}>
+          <span style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace' }}>{fmtMs(data.progressMs)}</span>
+          <span style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace' }}>{fmtMs(data.durationMs)}</span>
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div style={{ display:'flex', gap:'6px', justifyContent:'center' }}>
+        {([['⏮', 'previous'], [data.isPlaying ? '⏸' : '▶', data.isPlaying ? 'pause' : 'play'], ['⏭', 'next']] as [string,string][]).map(([icon, action])=>(
+          <button key={action} onClick={()=>ctrl(action)} style={{
+            background:'none', border:`1px solid ${C.border}`, color:C.cyan,
+            padding:'4px 10px', cursor:'pointer', fontFamily:'monospace', fontSize:'12px',
+            transition:'border-color 0.15s',
+          }}>{icon}</button>
+        ))}
+      </div>
+
+      <div style={{ display:'flex', alignItems:'center', gap:'5px', justifyContent:'center' }}>
+        <div style={{ width:'5px', height:'5px', borderRadius:'50%', background: data.isPlaying ? C.cyan : C.greenMuted }}/>
+        <span style={{ fontSize:'8px', color: data.isPlaying ? C.cyan : C.greenMuted, fontFamily:'monospace', letterSpacing:'0.15em' }}>{data.isPlaying ? 'PLAYING' : 'PAUSED'}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── NEW: Temps & Fans Widget ────────────────────────────────────────────────
+function TempsContent({ cpuTemp, fans, gpu }: { cpuTemp: CpuTempData; fans: FanData[]; gpu: GpuData | null }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
+      {/* CPU temps */}
+      <div>
+        <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.15em', marginBottom:'6px', fontFamily:'monospace' }}>CPU TEMPERATURE</div>
+        {cpuTemp.main != null
+          ? <>
+              <div style={{ fontSize:'22px', color:tempColor(cpuTemp.main), fontFamily:'monospace', lineHeight:1 }}>{cpuTemp.main.toFixed(0)}°C</div>
+              <div style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace', marginTop:'2px' }}>
+                {cpuTemp.max != null && `max ${cpuTemp.max.toFixed(0)}°C`}
+                {cpuTemp.cores.length > 0 && ` · ${cpuTemp.cores.length} cores`}
+              </div>
+              {cpuTemp.cores.length > 0 && (
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(40px,1fr))', gap:'3px', marginTop:'5px' }}>
+                  {cpuTemp.cores.slice(0,16).map((t,i)=>(
+                    <div key={i} style={{ textAlign:'center', border:`1px solid ${C.border}`, padding:'2px' }}>
+                      <div style={{ fontSize:'7px', color:C.greenMuted, fontFamily:'monospace' }}>C{i}</div>
+                      <div style={{ fontSize:'8px', color:tempColor(t), fontFamily:'monospace' }}>{t.toFixed(0)}°</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          : <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>N/A — may need admin rights</div>
+        }
+      </div>
+
+      {/* GPU temp */}
+      {gpu && (
+        <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:'8px' }}>
+          <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.15em', marginBottom:'4px', fontFamily:'monospace' }}>GPU TEMPERATURE</div>
+          <div style={{ fontSize:'18px', color:tempColor(gpu.temp), fontFamily:'monospace', lineHeight:1 }}>{gpu.temp.toFixed(1)}°C</div>
+        </div>
+      )}
+
+      {/* Fans */}
+      {fans.length > 0 && (
+        <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:'8px' }}>
+          <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.15em', marginBottom:'6px', fontFamily:'monospace' }}>FANS</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:'4px' }}>
+            {fans.map(f=>(
+              <div key={f.fan} style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <span style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>FAN {f.fan}</span>
+                <span style={{ fontSize:'10px', color:f.rpm > 0 ? C.cyan : C.greenMuted, fontFamily:'monospace' }}>{f.rpm > 0 ? `${f.rpm} RPM` : '—'}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {fans.length === 0 && cpuTemp.main == null && (
+        <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace' }}>Fan data not available on this system.</div>
+      )}
+    </div>
+  );
+}
+
+// ── NEW: Alerts Widget ──────────────────────────────────────────────────────
+function AlertsContent({ alerts }: { alerts: AlertData[] }) {
+  if (!alerts.length) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'6px' }}>
+      <div style={{ fontSize:'18px' }}>✓</div>
+      <div style={{ fontSize:'9px', color:C.green, fontFamily:'monospace', letterSpacing:'0.15em' }}>ALL CLEAR</div>
+      <div style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace' }}>No thresholds exceeded</div>
+    </div>
+  );
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'6px' }}>
+      <div style={{ fontSize:'9px', color:C.red, letterSpacing:'0.15em', fontFamily:'monospace', marginBottom:'2px' }}>⚠ {alerts.length} ALERT{alerts.length>1?'S':''}</div>
+      {alerts.map((a, i) => (
+        <div key={i} style={{ border:`1px solid ${C.red}40`, padding:'7px 9px', background:`${C.red}08` }}>
+          <div style={{ fontSize:'9px', color:C.red, fontFamily:'monospace' }}>{a.message}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+function HwinfoContent({ data }: { data: HwinfoData | null }) {
+  if (!data || !data.available) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'8px' }}>
+      <div style={{ fontSize:'10px', color:C.greenMuted, fontFamily:'monospace', textAlign:'center' }}>HWINFO NOT CONNECTED</div>
+      <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', textAlign:'center' }}>Enable Shared Memory Support in HWiNFO settings</div>
+    </div>
+  );
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'10px', height:'100%', overflow:'auto' }}>
+      {/* CPU */}
+      <div>
+        <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.15em', marginBottom:'6px', fontFamily:'monospace' }}>CPU</div>
+        <div style={{ display:'flex', gap:'16px', marginBottom:'6px' }}>
+          {data.cpu.packageTemp != null && (
+            <div>
+              <div style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace' }}>PACKAGE</div>
+              <div style={{ fontSize:'18px', color:tempColor(data.cpu.packageTemp), fontFamily:'monospace', lineHeight:1 }}>{data.cpu.packageTemp.toFixed(0)}°C</div>
+            </div>
+          )}
+          {data.cpu.power != null && (
+            <div>
+              <div style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace' }}>POWER</div>
+              <div style={{ fontSize:'18px', color:C.amber, fontFamily:'monospace', lineHeight:1 }}>{data.cpu.power.toFixed(0)}W</div>
+            </div>
+          )}
+        </div>
+        {data.cpu.coreTemps.length > 0 && (
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(44px,1fr))', gap:'3px' }}>
+            {data.cpu.coreTemps.map((c,i) => (
+              <div key={i} style={{ textAlign:'center', border:`1px solid ${C.border}`, padding:'2px 0' }}>
+                <div style={{ fontSize:'7px', color:C.greenMuted, fontFamily:'monospace' }}>{c.label.replace('-core ','')}</div>
+                <div style={{ fontSize:'9px', color:tempColor(c.temp), fontFamily:'monospace' }}>{c.temp.toFixed(0)}°</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {/* GPU */}
+      <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:'8px' }}>
+        <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.15em', marginBottom:'6px', fontFamily:'monospace' }}>GPU</div>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'6px' }}>
+          {([
+            ['TEMP', data.gpu.temp != null ? `${data.gpu.temp.toFixed(0)}°C` : '—', data.gpu.temp != null ? tempColor(data.gpu.temp) : C.greenMuted],
+            ['MEM JUNC', data.gpu.memJunctionTemp != null ? `${data.gpu.memJunctionTemp.toFixed(0)}°C` : '—', data.gpu.memJunctionTemp != null ? tempColor(data.gpu.memJunctionTemp) : C.greenMuted],
+            ['POWER', data.gpu.power != null ? `${data.gpu.power.toFixed(0)}W` : '—', C.amber],
+            ['LOAD', data.gpu.load != null ? `${data.gpu.load.toFixed(0)}%` : '—', C.orange],
+            ['CLOCK', data.gpu.clockMhz != null ? `${data.gpu.clockMhz.toFixed(0)}` : '—', C.cyan],
+            ['MEM CLK', data.gpu.memClockMhz != null ? `${data.gpu.memClockMhz.toFixed(0)}` : '—', C.cyan],
+            ['MEM USE', data.gpu.memUsagePct != null ? `${data.gpu.memUsagePct.toFixed(0)}%` : '—', C.purple],
+            ['FAN RPM', data.gpu.fanRpm != null ? `${data.gpu.fanRpm.toFixed(0)}` : '—', C.blue],
+          ] as [string,string,string][]).map(([k,v,col]) => (
+            <div key={k}>
+              <div style={{ fontSize:'7px', color:C.greenMuted, fontFamily:'monospace' }}>{k}</div>
+              <div style={{ fontSize:'10px', color:col, fontFamily:'monospace' }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* Fans */}
+      {data.fans.cpuFanRpm != null && (
+        <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:'8px' }}>
+          <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.15em', marginBottom:'4px', fontFamily:'monospace' }}>FANS</div>
+          <div style={{ fontSize:'10px', color:C.cyan, fontFamily:'monospace' }}>CPU: {data.fans.cpuFanRpm.toFixed(0)} RPM</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Settings Drawer ────────────────────────────────────────────────────────
 function SettingsDrawer({ settings, onUpdate, onClose, currentPageIdx }: {
   settings: DashSettings;
@@ -522,136 +796,69 @@ function SettingsDrawer({ settings, onUpdate, onClose, currentPageIdx }: {
   const previewRef = useRef<ReturnType<typeof setInterval>|null>(null);
 
   const startPreview = () => {
-    setPreview(true);
-    setPreviewPage(0);
-    let i = 0;
-    previewRef.current = setInterval(() => {
-      i = (i+1) % settings.pages.length;
-      setPreviewPage(i);
-    }, settings.rotateInterval * 1000);
+    setPreview(true); setPreviewPage(0); let i = 0;
+    previewRef.current = setInterval(() => { i = (i+1) % settings.pages.length; setPreviewPage(i); }, settings.rotateInterval * 1000);
   };
-
-  const stopPreview = () => {
-    setPreview(false);
-    if (previewRef.current) clearInterval(previewRef.current);
-  };
-
+  const stopPreview = () => { setPreview(false); if (previewRef.current) clearInterval(previewRef.current); };
   useEffect(() => () => { if (previewRef.current) clearInterval(previewRef.current); }, []);
 
   const addPage = () => {
-    const newPage: PageConfig = {
-      id: `p${Date.now()}`,
-      name: `PAGE ${settings.pages.length + 1}`,
-      layout: [],
-      visible: makeDefaultVisible([]),
-    };
+    const newPage: PageConfig = { id: `p${Date.now()}`, name: `PAGE ${settings.pages.length + 1}`, layout: [], visible: makeDefaultVisible([]) };
     onUpdate({ ...settings, pages: [...settings.pages, newPage] });
   };
-
   const removePage = (idx: number) => {
     if (settings.pages.length <= 1) return;
     const pages = settings.pages.filter((_,i) => i !== idx);
     onUpdate({ ...settings, pages, currentPage: Math.min(settings.currentPage, pages.length-1) });
   };
-
   const renamePage = (idx: number, name: string) => {
     const pages = settings.pages.map((p,i) => i===idx ? {...p, name} : p);
     onUpdate({ ...settings, pages });
   };
 
   return (
-    <div style={{
-      position:'fixed', top:0, right:0, bottom:0, width:'320px',
-      background:C.bgCard, borderLeft:`1px solid ${C.borderMid}`,
-      zIndex:1000, display:'flex', flexDirection:'column',
-      boxShadow:`-8px 0 32px #00000060`,
-    }}>
-      {/* Header */}
+    <div style={{ position:'fixed', top:0, right:0, bottom:0, width:'320px', background:C.bgCard, borderLeft:`1px solid ${C.borderMid}`, zIndex:1000, display:'flex', flexDirection:'column', boxShadow:`-8px 0 32px #00000060` }}>
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'14px 16px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
         <span style={{ fontSize:'10px', letterSpacing:'0.25em', color:C.greenDim, fontFamily:'monospace' }}>SETTINGS</span>
         <button onClick={onClose} style={{ background:'none', border:'none', color:C.greenMuted, cursor:'pointer', fontSize:'14px', fontFamily:'monospace' }}>✕</button>
       </div>
-
       <div style={{ flex:1, overflow:'auto', padding:'16px', display:'flex', flexDirection:'column', gap:'20px' }}>
-
-        {/* Auto Rotate */}
         <section>
           <div style={{ fontSize:'9px', color:C.greenMuted, letterSpacing:'0.2em', marginBottom:'10px', fontFamily:'monospace' }}>AUTO ROTATE</div>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'12px' }}>
             <span style={{ fontSize:'10px', color:C.text, fontFamily:'monospace' }}>Enable rotation</span>
-            <button
-              onClick={() => onUpdate({...settings, autoRotate:!settings.autoRotate})}
-              style={{
-                width:'36px', height:'18px', border:`1px solid ${settings.autoRotate?C.green:C.border}`,
-                background: settings.autoRotate ? `${C.green}20` : 'none',
-                cursor:'pointer', position:'relative', transition:'all 0.2s',
-              }}>
-              <div style={{
-                position:'absolute', top:'2px', width:'12px', height:'12px',
-                background: settings.autoRotate ? C.green : C.greenMuted,
-                left: settings.autoRotate ? '20px' : '2px',
-                transition:'all 0.2s',
-              }}/>
+            <button onClick={() => onUpdate({...settings, autoRotate:!settings.autoRotate})} style={{ width:'36px', height:'18px', border:`1px solid ${settings.autoRotate?C.green:C.border}`, background: settings.autoRotate ? `${C.green}20` : 'none', cursor:'pointer', position:'relative', transition:'all 0.2s' }}>
+              <div style={{ position:'absolute', top:'2px', width:'12px', height:'12px', background: settings.autoRotate ? C.green : C.greenMuted, left: settings.autoRotate ? '20px' : '2px', transition:'all 0.2s' }}/>
             </button>
           </div>
           <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
             <span style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace', whiteSpace:'nowrap' }}>INTERVAL</span>
-            <input
-              type="range" min={5} max={120} step={5}
-              value={settings.rotateInterval}
-              onChange={e => onUpdate({...settings, rotateInterval:Number(e.target.value)})}
-              style={{ flex:1, accentColor:C.green }}
-            />
+            <input type="range" min={5} max={120} step={5} value={settings.rotateInterval} onChange={e => onUpdate({...settings, rotateInterval:Number(e.target.value)})} style={{ flex:1, accentColor:C.green }}/>
             <span style={{ fontSize:'10px', color:C.green, fontFamily:'monospace', minWidth:'32px', textAlign:'right' }}>{settings.rotateInterval}s</span>
           </div>
           <div style={{ display:'flex', gap:'8px', marginTop:'10px' }}>
-            <button
-              onClick={preview ? stopPreview : startPreview}
-              style={{ fontSize:'9px', padding:'4px 10px', letterSpacing:'0.12em', border:`1px solid ${preview?C.amber:C.border}`, color:preview?C.amber:C.greenMuted, background:'none', cursor:'pointer', fontFamily:'monospace', flex:1 }}>
+            <button onClick={preview ? stopPreview : startPreview} style={{ fontSize:'9px', padding:'4px 10px', letterSpacing:'0.12em', border:`1px solid ${preview?C.amber:C.border}`, color:preview?C.amber:C.greenMuted, background:'none', cursor:'pointer', fontFamily:'monospace', flex:1 }}>
               {preview ? `PREVIEWING — PAGE ${previewPage+1}` : 'PREVIEW ROTATION'}
             </button>
           </div>
         </section>
-
         <div style={{ borderTop:`1px solid ${C.border}` }}/>
-
-        {/* Pages */}
         <section>
           <div style={{ fontSize:'9px', color:C.greenMuted, letterSpacing:'0.2em', marginBottom:'10px', fontFamily:'monospace' }}>PAGES</div>
           <div style={{ display:'flex', flexDirection:'column', gap:'6px' }}>
             {settings.pages.map((page, idx) => (
-              <div key={page.id} style={{
-                display:'flex', alignItems:'center', gap:'8px',
-                padding:'8px 10px', border:`1px solid ${idx===currentPageIdx?C.green:C.border}`,
-                background: idx===currentPageIdx ? `${C.green}08` : 'none',
-              }}>
+              <div key={page.id} style={{ display:'flex', alignItems:'center', gap:'8px', padding:'8px 10px', border:`1px solid ${idx===currentPageIdx?C.green:C.border}`, background: idx===currentPageIdx ? `${C.green}08` : 'none' }}>
                 <div style={{ width:'6px', height:'6px', borderRadius:'50%', background:idx===currentPageIdx?C.green:C.greenMuted, flexShrink:0 }}/>
-                <input
-                  value={page.name}
-                  onChange={e => renamePage(idx, e.target.value)}
-                  style={{
-                    flex:1, background:'none', border:'none', color:C.text,
-                    fontSize:'10px', fontFamily:'monospace', outline:'none',
-                  }}
-                />
+                <input value={page.name} onChange={e => renamePage(idx, e.target.value)} style={{ flex:1, background:'none', border:'none', color:C.text, fontSize:'10px', fontFamily:'monospace', outline:'none' }}/>
                 {settings.pages.length > 1 && (
-                  <button
-                    onClick={() => removePage(idx)}
-                    style={{ background:'none', border:'none', color:C.greenMuted, cursor:'pointer', fontSize:'10px', fontFamily:'monospace', padding:0 }}>✕</button>
+                  <button onClick={() => removePage(idx)} style={{ background:'none', border:'none', color:C.greenMuted, cursor:'pointer', fontSize:'10px', fontFamily:'monospace', padding:0 }}>✕</button>
                 )}
               </div>
             ))}
-            <button
-              onClick={addPage}
-              style={{ fontSize:'9px', padding:'6px', letterSpacing:'0.12em', border:`1px dashed ${C.border}`, color:C.greenMuted, background:'none', cursor:'pointer', fontFamily:'monospace', textAlign:'center' }}>
-              + ADD PAGE
-            </button>
+            <button onClick={addPage} style={{ fontSize:'9px', padding:'6px', letterSpacing:'0.12em', border:`1px dashed ${C.border}`, color:C.greenMuted, background:'none', cursor:'pointer', fontFamily:'monospace', textAlign:'center' }}>+ ADD PAGE</button>
           </div>
         </section>
-
         <div style={{ borderTop:`1px solid ${C.border}` }}/>
-
-        {/* Info */}
         <section>
           <div style={{ fontSize:'9px', color:C.greenMuted, letterSpacing:'0.2em', marginBottom:'8px', fontFamily:'monospace' }}>TIPS</div>
           <div style={{ fontSize:'9px', color:C.textMuted, fontFamily:'monospace', lineHeight:1.6 }}>
@@ -659,7 +866,8 @@ function SettingsDrawer({ settings, onUpdate, onClose, currentPageIdx }: {
             Resize from the corner handle.<br/>
             Click ✕ on a widget to hide it.<br/>
             Use + to add widgets back.<br/>
-            Layout saves automatically.
+            Layout saves automatically.<br/>
+            Spotify: enable in config.ts then visit /spotify/auth.
           </div>
         </section>
       </div>
@@ -668,30 +876,16 @@ function SettingsDrawer({ settings, onUpdate, onClose, currentPageIdx }: {
 }
 
 // ── Add Widget Panel ───────────────────────────────────────────────────────
-function AddWidgetPanel({ visible, onAdd, onClose }: {
-  visible: Record<WidgetKey, boolean>;
-  onAdd: (k: WidgetKey) => void;
-  onClose: () => void;
-}) {
+function AddWidgetPanel({ visible, onAdd, onClose }: { visible: Record<WidgetKey, boolean>; onAdd: (k: WidgetKey) => void; onClose: () => void; }) {
   const hidden = ALL_WIDGETS.filter(k => !visible[k]);
   return (
-    <div style={{
-      position:'absolute', top:'100%', right:0, marginTop:'4px',
-      background:C.bgCard, border:`1px solid ${C.borderMid}`,
-      padding:'10px', zIndex:100, minWidth:'200px',
-      boxShadow:`0 8px 24px #00000060`,
-    }}>
+    <div style={{ position:'absolute', top:'100%', right:0, marginTop:'4px', background:C.bgCard, border:`1px solid ${C.borderMid}`, padding:'10px', zIndex:100, minWidth:'200px', boxShadow:`0 8px 24px #00000060` }}>
       <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.18em', marginBottom:'8px', fontFamily:'monospace' }}>ADD WIDGET</div>
       {hidden.length === 0
         ? <div style={{ fontSize:'9px', color:C.textMuted, fontFamily:'monospace' }}>All widgets visible</div>
         : <div style={{ display:'flex', flexDirection:'column', gap:'4px' }}>
             {hidden.map(k => (
-              <button key={k} onClick={() => { onAdd(k); onClose(); }} style={{
-                display:'flex', alignItems:'center', gap:'8px', padding:'6px 8px',
-                background:'none', border:`1px solid ${C.border}`, cursor:'pointer',
-                color:WIDGET_META[k].accent, fontFamily:'monospace', fontSize:'9px',
-                letterSpacing:'0.12em', textAlign:'left', transition:'border-color 0.15s',
-              }}>
+              <button key={k} onClick={() => { onAdd(k); onClose(); }} style={{ display:'flex', alignItems:'center', gap:'8px', padding:'6px 8px', background:'none', border:`1px solid ${C.border}`, cursor:'pointer', color:WIDGET_META[k].accent, fontFamily:'monospace', fontSize:'9px', letterSpacing:'0.12em', textAlign:'left' }}>
                 <div style={{ width:'2px', height:'10px', background:WIDGET_META[k].accent, flexShrink:0 }}/>
                 {WIDGET_META[k].label}
               </button>
@@ -703,6 +897,26 @@ function AddWidgetPanel({ visible, onAdd, onClose }: {
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
+
+// Memoized widget components
+const ClockContentM = memo(ClockContent);
+const WeatherContentM = memo(WeatherContent);
+const CpuContentM = memo(CpuContent);
+const CpuGraphContentM = memo(CpuGraphContent);
+const MemContentM = memo(MemContent);
+const MemGraphContentM = memo(MemGraphContent);
+const GpuContentM = memo(GpuContent);
+const GpuGraphContentM = memo(GpuGraphContent);
+const DiskContentM = memo(DiskContent);
+const ProcessContentM = memo(ProcessContent);
+const NetworkContentM = memo(NetworkContent);
+const DockerContentM = memo(DockerContent);
+const SpotifyContentM = memo(SpotifyContent);
+const TempsContentM = memo(TempsContent);
+const AlertsContentM = memo(AlertsContent);
+const HwinfoContentM = memo(HwinfoContent);
+const SettingsDrawerM = memo(SettingsDrawer);
+const AddWidgetPanelM = memo(AddWidgetPanel);
 export default function Dashboard() {
   const [metrics, setMetrics] = useState<Metrics|null>(null);
   const [connected, setConnected] = useState(false);
@@ -727,20 +941,16 @@ export default function Dashboard() {
   const wsRef = useRef<WebSocket|null>(null);
 
   const sendMessage = useCallback((msg: object) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
-    }
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify(msg));
   }, []);
 
   const currentPage = settings.pages[settings.currentPage] ?? settings.pages[0];
 
-  // Save settings
   const saveSettings = useCallback((s: DashSettings) => {
     setSettings(s);
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {}
   }, []);
 
-  // Container width
   useEffect(() => {
     const measure = () => { if (containerRef.current) setWidth(containerRef.current.offsetWidth); };
     measure();
@@ -748,7 +958,6 @@ export default function Dashboard() {
     return () => window.removeEventListener('resize', measure);
   }, []);
 
-  // WebSocket
   useEffect(() => {
     let ws: WebSocket, timer: ReturnType<typeof setTimeout>;
     const connect = () => {
@@ -756,7 +965,6 @@ export default function Dashboard() {
       wsRef.current = ws;
       ws.onopen = () => {
         setConnected(true);
-        // Send saved location on connect
         try {
           const saved = localStorage.getItem('sysmonitor-location');
           if (saved) ws.send(JSON.stringify({ type: 'setLocation', ...JSON.parse(saved) }));
@@ -766,7 +974,7 @@ export default function Dashboard() {
         try {
           const data: Metrics = JSON.parse(e.data);
           setMetrics(data);
-          const pt: HistoryPoint = { t:Date.now(), cpu:data.cpu.load, mem:data.mem.percent, gpuLoad:data.gpu?.load??0, gpuTemp:data.gpu?.temp??0 };
+          const pt: HistoryPoint = { t:Date.now(), cpu:data.cpu.load, mem:data.mem.percent, gpuLoad:data.hwinfo?.gpu?.load??0, gpuTemp:data.hwinfo?.gpu?.temp??0, cpuTemp:data.hwinfo?.cpu?.packageTemp??data.cpuTemp?.main??0 };
           historyRef.current = [...historyRef.current, pt].slice(-HISTORY_LEN);
           setHistory([...historyRef.current]);
         } catch {}
@@ -778,7 +986,6 @@ export default function Dashboard() {
     return () => { clearTimeout(timer); ws?.close(); };
   }, []);
 
-  // Auto rotate
   useEffect(() => {
     if (rotateRef.current) clearInterval(rotateRef.current);
     if (settings.autoRotate && settings.pages.length > 1) {
@@ -793,62 +1000,67 @@ export default function Dashboard() {
     return () => { if (rotateRef.current) clearInterval(rotateRef.current); };
   }, [settings.autoRotate, settings.rotateInterval, settings.pages.length]);
 
-  // Close add widget on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (showAddWidget && addWidgetRef.current && !addWidgetRef.current.contains(e.target as Node)) {
-        setShowAddWidget(false);
-      }
+      if (showAddWidget && addWidgetRef.current && !addWidgetRef.current.contains(e.target as Node)) setShowAddWidget(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [showAddWidget]);
 
-  // Set mounted after hydration
   useEffect(() => { setMounted(true); }, []);
 
+  const router = useRouter();
+  useEffect(() => {
+    try { if (sessionStorage.getItem('sysmonitor-setup-ok') === '1') return; } catch {}
+    fetch('http://127.0.0.1:3001/api/setup/status')
+      .then(r => r.json())
+      .then(d => {
+        if (d.setupRequired) { router.push('/setup'); return; }
+        try { sessionStorage.setItem('sysmonitor-setup-ok', '1'); } catch {}
+      })
+      .catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+
   const updateCurrentPage = useCallback((updates: Partial<PageConfig>) => {
-    saveSettings({
-      ...settings,
-      pages: settings.pages.map((p,i) => i===settings.currentPage ? {...p,...updates} : p),
-    });
+    saveSettings({ ...settings, pages: settings.pages.map((p,i) => i===settings.currentPage ? {...p,...updates} : p) });
   }, [settings, saveSettings]);
 
-  const onLayoutChange = useCallback((layout: Layout[]) => {
-    updateCurrentPage({ layout });
-  }, [updateCurrentPage]);
-
-  const hideWidget = useCallback((k: WidgetKey) => {
-    updateCurrentPage({ visible: { ...currentPage.visible, [k]: false } });
-  }, [currentPage, updateCurrentPage]);
-
+  const onLayoutChange = useCallback((layout: any[]) => { updateCurrentPage({ layout }); }, [updateCurrentPage]);
+  const hideWidget = useCallback((k: WidgetKey) => { updateCurrentPage({ visible: { ...currentPage.visible, [k]: false } }); }, [currentPage, updateCurrentPage]);
   const addWidget = useCallback((k: WidgetKey) => {
     const existing = currentPage.layout.find(l => l.i === k);
-    const newLayout = existing
-      ? currentPage.layout
-      : [...currentPage.layout, { i:k, x:0, y:Infinity, w:4, h:6, minW:1, minH:1 }];
+    const newLayout = existing ? currentPage.layout : [...currentPage.layout, { i:k, x:0, y:Infinity, w:4, h:6, minW:1, minH:1 }];
     updateCurrentPage({ visible: { ...currentPage.visible, [k]: true }, layout: newLayout });
   }, [currentPage, updateCurrentPage]);
 
+  const hasAlerts = (metrics?.alerts?.length ?? 0) > 0;
+
   const getWidgetContent = (k: WidgetKey) => {
     switch(k) {
-      case 'clock':    return <ClockContent/>;
-      case 'weather':  return <WeatherContent data={metrics?.weather??null} onSendMessage={sendMessage}/>;
-      case 'cpu':      return <CpuContent data={metrics?.cpu??null}/>;
-      case 'cpuGraph': return <CpuGraphContent history={history}/>;
-      case 'memory':   return <MemContent data={metrics?.mem??null}/>;
-      case 'memGraph': return <MemGraphContent history={history}/>;
-      case 'gpu':      return <GpuContent data={metrics?.gpu??null}/>;
-      case 'gpuGraph': return <GpuGraphContent history={history}/>;
-      case 'disk':     return <DiskContent data={metrics?.disk??[]}/>;
-      case 'processes':return <ProcessContent data={metrics?.processes??[]}/>;
-      case 'network':  return <NetworkContent data={metrics?.network??null}/>;
-      case 'docker':   return <DockerContent data={metrics?.docker??null}/>;
+      case 'clock':    return <ClockContentM/>;
+      case 'weather':  return <WeatherContentM data={metrics?.weather??null} onSendMessage={sendMessage}/>;
+      case 'cpu':      return <CpuContentM data={metrics?.cpu??null}/>;
+      case 'cpuGraph': return <CpuGraphContentM history={history}/>;
+      case 'memory':   return <MemContentM data={metrics?.mem??null}/>;
+      case 'memGraph': return <MemGraphContentM history={history}/>;
+      case 'gpu':      return <GpuContentM data={metrics?.hwinfo?.available ? {model:'RTX 5070',load:metrics.hwinfo.gpu.load??0,memUsed:0,memTotal:0,memPercent:metrics.hwinfo.gpu.memUsagePct??0,temp:metrics.hwinfo.gpu.temp??0,powerDraw:metrics.hwinfo.gpu.power??null,powerLimit:250} : null}/>;
+      case 'gpuGraph': return <GpuGraphContentM history={history}/>;
+      case 'disk':     return <DiskContentM data={metrics?.disk??[]}/>;
+      case 'processes':return <ProcessContentM data={metrics?.processes??[]}/>;
+      case 'network':  return <NetworkContentM data={metrics?.network??null}/>;
+      case 'docker':   return <DockerContentM data={metrics?.docker??null}/>;
+      case 'spotify':  return <SpotifyContentM data={metrics?.spotify??null} onSendMessage={sendMessage}/>;
+      case 'temps':    return <TempsContentM cpuTemp={metrics?.cpuTemp ?? {main:null,cores:[],max:null}} fans={metrics?.fans??[]} gpu={metrics?.hwinfo?.available ? {model:'RTX 5070',load:metrics.hwinfo.gpu.load??0,memUsed:0,memTotal:0,memPercent:metrics.hwinfo.gpu.memUsagePct??0,temp:metrics.hwinfo.gpu.temp??0,powerDraw:metrics.hwinfo.gpu.power??null,powerLimit:250} : null}/>;
+      case 'alerts':   return <AlertsContentM alerts={metrics?.alerts??[]}/>
+      case 'hwinfo':   return <HwinfoContentM data={metrics?.hwinfo??null}/>;
     }
   };
 
   const getWidgetTitle = (k: WidgetKey) => {
     if (k === 'docker') return `DOCKER // ${metrics?.docker?.length??0}`;
+    if (k === 'alerts') return `ALERTS ${hasAlerts ? `// ${metrics!.alerts.length}` : '// OK'}`;
     return WIDGET_META[k].label;
   };
 
@@ -857,6 +1069,7 @@ export default function Dashboard() {
   return (
     <>
       <style>{`
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
         .react-grid-item.react-grid-placeholder{background:${C.green}12!important;border:1px dashed ${C.green}40!important;border-radius:0!important;}
         .react-resizable-handle{opacity:0;transition:opacity 0.2s;}
         .react-grid-item:hover .react-resizable-handle{opacity:1;}
@@ -877,50 +1090,36 @@ export default function Dashboard() {
           <div style={{ display:'flex', alignItems:'center', gap:'8px' }}>
             <div style={{ width:'7px', height:'7px', borderRadius:'50%', background:connected?C.green:C.red, boxShadow:connected?`0 0 5px ${C.green}`:'none', transition:'all 0.3s' }}/>
             <span style={{ fontSize:'10px', color:connected?C.green:C.red, letterSpacing:'0.18em' }}>{connected?'LIVE':'RECONNECTING'}</span>
+            {hasAlerts && <span style={{ fontSize:'9px', color:C.red, fontFamily:'monospace', letterSpacing:'0.12em', animation:'pulse 1s infinite' }}>⚠ {metrics!.alerts.length} ALERT{metrics!.alerts.length>1?'S':''}</span>}
           </div>
 
-          {/* Page tabs */}
           <div style={{ display:'flex', alignItems:'center', gap:'0px' }}>
             <span style={{ fontSize:'11px', color:C.greenDim, letterSpacing:'0.3em', marginRight:'16px' }}>SYS.MONITOR</span>
             <div style={{ display:'flex', gap:'2px' }}>
               {settings.pages.map((page, idx) => (
-                <button key={page.id} onClick={() => saveSettings({...settings, currentPage:idx})} style={{
-                  fontSize:'9px', padding:'4px 10px', letterSpacing:'0.12em',
-                  background: idx===settings.currentPage ? `${C.green}15` : 'none',
-                  border:`1px solid ${idx===settings.currentPage?C.green:C.border}`,
-                  color: idx===settings.currentPage ? C.green : C.textMuted,
-                  cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s',
-                }}>{page.name}</button>
+                <button key={page.id} onClick={() => saveSettings({...settings, currentPage:idx})} style={{ fontSize:'9px', padding:'4px 10px', letterSpacing:'0.12em', background: idx===settings.currentPage ? `${C.green}15` : 'none', border:`1px solid ${idx===settings.currentPage?C.green:C.border}`, color: idx===settings.currentPage ? C.green : C.textMuted, cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s' }}>{page.name}</button>
               ))}
             </div>
           </div>
 
           <div style={{ display:'flex', gap:'6px', alignItems:'center', position:'relative' }} ref={addWidgetRef}>
-            {/* Rotate indicator */}
-            {settings.autoRotate && (
-              <span style={{ fontSize:'8px', color:C.amber, letterSpacing:'0.12em', fontFamily:'monospace' }}>⟳ {settings.rotateInterval}s</span>
-            )}
-            {/* Last update */}
-            <span style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>
-              {metrics ? new Date(metrics.timestamp).toLocaleTimeString() : '—'}
-            </span>
+            {settings.autoRotate && <span style={{ fontSize:'8px', color:C.amber, letterSpacing:'0.12em', fontFamily:'monospace' }}>⟳ {settings.rotateInterval}s</span>}
+            <span style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>{metrics ? new Date(metrics.timestamp).toLocaleTimeString() : '—'}</span>
             <button onClick={() => setShowAddWidget(v=>!v)} style={{ fontSize:'9px', color:showAddWidget?C.green:C.textMuted, letterSpacing:'0.15em', background:'none', border:`1px solid ${showAddWidget?C.green:C.border}`, padding:'4px 8px', cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s' }}>+</button>
             <button onClick={() => setShowSettings(v=>!v)} style={{ fontSize:'9px', color:showSettings?C.green:C.textMuted, letterSpacing:'0.15em', background:'none', border:`1px solid ${showSettings?C.green:C.border}`, padding:'4px 8px', cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s' }}>⚙</button>
-            {showAddWidget && (
-              <AddWidgetPanel visible={currentPage.visible} onAdd={addWidget} onClose={()=>setShowAddWidget(false)}/>
-            )}
+            {showAddWidget && <AddWidgetPanelM visible={currentPage.visible} onAdd={addWidget} onClose={()=>setShowAddWidget(false)}/>}
           </div>
         </div>
 
         {/* Grid */}
         <div style={{ flex:1, overflow:'auto', padding:'10px' }} ref={containerRef}>
-          {mounted && <GridLayout
+          {mounted && <Grid
             layout={activeLayout}
             cols={12}
             rowHeight={30}
             width={width - 20}
             draggableHandle=".drag-handle"
-            onLayoutChange={onLayoutChange}
+            onLayoutChange={onLayoutChange as any}
             onDragStart={(_l:any,_o:any,_n:any,_p:any,_e:any,el:HTMLElement)=>setDragging(el.closest('[data-widget]')?.getAttribute('data-widget')??null)}
             onDragStop={()=>setDragging(null)}
             margin={[8,8]}
@@ -930,38 +1129,32 @@ export default function Dashboard() {
           >
             {ALL_WIDGETS.filter(k=>currentPage.visible[k]).map(k=>(
               <div key={k} data-widget={k}>
-                <Card title={getWidgetTitle(k)} accent={WIDGET_META[k].accent} onClose={()=>hideWidget(k)} isDragging={dragging===k}>
+                <Card
+                  title={getWidgetTitle(k)}
+                  accent={WIDGET_META[k].accent}
+                  onClose={()=>hideWidget(k)}
+                  isDragging={dragging===k}
+                  flash={k==='alerts' && hasAlerts}
+                >
                   {getWidgetContent(k)}
                 </Card>
               </div>
             ))}
-          </GridLayout>}
+          </Grid>}
         </div>
 
         {/* Page dots */}
         {settings.pages.length > 1 && (
           <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:'6px', padding:'6px', borderTop:`1px solid ${C.border}`, flexShrink:0 }}>
             {settings.pages.map((page,idx)=>(
-              <button key={page.id} onClick={()=>saveSettings({...settings,currentPage:idx})} style={{
-                width: idx===settings.currentPage ? '20px' : '6px',
-                height:'6px', borderRadius:'3px',
-                background: idx===settings.currentPage ? C.green : C.greenMuted,
-                border:'none', cursor:'pointer', padding:0,
-                transition:'all 0.3s',
-              }}/>
+              <button key={page.id} onClick={()=>saveSettings({...settings,currentPage:idx})} style={{ width: idx===settings.currentPage ? '20px' : '6px', height:'6px', borderRadius:'3px', background: idx===settings.currentPage ? C.green : C.greenMuted, border:'none', cursor:'pointer', padding:0, transition:'all 0.3s' }}/>
             ))}
           </div>
         )}
       </div>
 
-      {/* Settings drawer */}
       {showSettings && (
-        <SettingsDrawer
-          settings={settings}
-          onUpdate={saveSettings}
-          onClose={()=>setShowSettings(false)}
-          currentPageIdx={settings.currentPage}
-        />
+        <SettingsDrawerM settings={settings} onUpdate={saveSettings} onClose={()=>setShowSettings(false)} currentPageIdx={settings.currentPage}/>
       )}
     </>
   );

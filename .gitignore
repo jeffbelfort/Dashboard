@@ -2,3 +2,7 @@
 .next/
 *.db
 dist/
+
+backend/src/config.ts
+
+frontend/.next/

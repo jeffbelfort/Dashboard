@@ -7,15 +7,14 @@ export interface GpuData {
   memTotal: number;
   memPercent: number;
   temp: number;
+  powerDraw: number | null;
+  powerLimit: number | null;
 }
 
 export async function getGpuStats(): Promise<GpuData | null> {
   try {
-    const [controllers, mem] = await Promise.all([
-      si.graphics(),
-      si.graphics(),
-    ]);
-    const gpu = controllers.controllers[0];
+    const graphics = await si.graphics();
+    const gpu = graphics.controllers[0];
     if (!gpu) return null;
     const memTotal = gpu.vram ? gpu.vram * 1024 * 1024 : 0;
     const memUsed = gpu.memoryUsed ? gpu.memoryUsed * 1024 * 1024 : 0;
@@ -26,6 +25,8 @@ export async function getGpuStats(): Promise<GpuData | null> {
       memTotal,
       memPercent: memTotal > 0 ? (memUsed / memTotal) * 100 : 0,
       temp: gpu.temperatureGpu ?? 0,
+      powerDraw: (gpu as any).powerDraw ?? null,
+      powerLimit: (gpu as any).powerLimit ?? null,
     };
   } catch {
     return null;

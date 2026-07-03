@@ -1,24 +1,21 @@
 {
-  "name": "backend",
+  "name": "sysmonitor-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
   "scripts": {
-    "dev": "ts-node-dev --respawn src/index.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "dockerode": "^4.0.0",
-    "systeminformation": "^5.0.0",
-    "ws": "^8.0.0"
+    "systeminformation": "^5.22.11",
+    "ws": "^8.17.0"
   },
   "devDependencies": {
-    "@types/dockerode": "^3.3.0",
+    "@types/dockerode": "^3.3.28",
     "@types/node": "^20.0.0",
-    "@types/ws": "^8.0.0",
+    "@types/ws": "^8.5.10",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.0.0"
   }
