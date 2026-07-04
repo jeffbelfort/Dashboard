@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import https from 'https';
+import fs from 'fs';
 import { configExists, writeConfig, SetupPayload } from './setup';
 
 // ── Config loading ─────────────────────────────────────────────────────────
@@ -22,6 +23,9 @@ let getAuthUrl: any, exchangeCode: any;
 let insertMetric: any, getHistory: any, getHistoryStats: any, pruneOlderThan: any, getDailyComparison: any;
 let getAvailableDays: any, getDayStats: any;
 let logEvent: any, getEvents: any, pruneEvents: any;
+let getEngineHealth: any, getRawRecords: any, getRecordLayout: any, runBenchmark: any;
+let previewPrune: any, getExportPath: any, exportRangeAsRows: any;
+let recordIfPeak: any, getTopPeaks: any, getPeaksTable: any, getRunningMaxes: any;
 
 if (!IS_SETUP) {
   ({ getCpuLoad } = require('./collectors/cpu'));
@@ -32,7 +36,9 @@ if (!IS_SETUP) {
   ({ getTopProcesses } = require('./collectors/processes'));
   ({ getHwinfoData } = require('./collectors/hwinfo'));
   ({ getSpotifyNowPlaying, spotifyControl, getAuthUrl, exchangeCode } = require('./collectors/spotify'));
-  ({ insertMetric, getHistory, getStats: getHistoryStats, pruneOlderThan, getDailyComparison, getAvailableDays, getDayStats } = require('./db'));
+  ({ insertMetric, getHistory, getStats: getHistoryStats, pruneOlderThan, getDailyComparison, getAvailableDays, getDayStats,
+     getEngineHealth, getRawRecords, getRecordLayout, runBenchmark, previewPrune, getExportPath, exportRangeAsRows } = require('./db'));
+  ({ recordIfPeak, getTopPeaks, getPeaksTable, getRunningMaxes } = require('./peaks'));
   ({ logEvent, getEvents, pruneEvents } = require('./events'));
 }
 
@@ -137,6 +143,138 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── SYS.LITE Engine endpoints ──────────────────────────────────────────
+  if (url.pathname === '/syslite/health' && getEngineHealth) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getEngineHealth()));
+    return;
+  }
+
+  if (url.pathname === '/syslite/records' && getRawRecords) {
+    const page = parseInt(url.searchParams.get('page') ?? '0');
+    const pageSize = parseInt(url.searchParams.get('pageSize') ?? '50');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getRawRecords(page, pageSize)));
+    return;
+  }
+
+  if (url.pathname === '/syslite/layout' && getRecordLayout) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getRecordLayout()));
+    return;
+  }
+
+  if (url.pathname === '/syslite/benchmark' && runBenchmark) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(runBenchmark()));
+    return;
+  }
+
+  if (url.pathname === '/syslite/prune/preview' && previewPrune) {
+    const days = parseInt(url.searchParams.get('days') ?? '7');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(previewPrune(days)));
+    return;
+  }
+
+  if (url.pathname === '/syslite/prune/confirm' && req.method === 'POST' && pruneOlderThan) {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { days, confirm } = JSON.parse(body || '{}');
+        if (confirm !== true) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'Confirmation required' }));
+          return;
+        }
+        pruneOlderThan(days ?? 7);
+        logEvent?.('setup_completed', `Manual prune executed (older than ${days ?? 7}d)`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === '/syslite/export/raw' && getExportPath) {
+    const filePath = getExportPath();
+    if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('No data file yet'); return; }
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': 'attachment; filename="history.bin"',
+    });
+    fs.createReadStream(filePath).pipe(res);
+    return;
+  }
+
+  if (url.pathname === '/syslite/export/csv' && exportRangeAsRows) {
+    const minutes = parseInt(url.searchParams.get('minutes') ?? '1440');
+    const rows = exportRangeAsRows(minutes);
+    const header = 'timestamp,cpu_load,cpu_temp,mem_percent,gpu_load,gpu_temp,gpu_power\n';
+    const csv = header + rows.map((r: any) =>
+      `${new Date(r.ts).toISOString()},${r.cpu_load ?? ''},${r.cpu_temp ?? ''},${r.mem_percent ?? ''},${r.gpu_load ?? ''},${r.gpu_temp ?? ''},${r.gpu_power ?? ''}`
+    ).join('\n');
+    res.writeHead(200, {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="sysmonitor-export-${minutes}min.csv"`,
+    });
+    res.end(csv);
+    return;
+  }
+
+  // ── Peak Events (second table, demonstrates multi-table support) ───────
+  if (url.pathname === '/syslite/peaks' && getTopPeaks) {
+    const metric = url.searchParams.get('metric') ?? 'gpu_temp';
+    const limit = parseInt(url.searchParams.get('limit') ?? '10');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getTopPeaks(metric, limit)));
+    return;
+  }
+
+  if (url.pathname === '/syslite/peaks/current' && getRunningMaxes) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getRunningMaxes()));
+    return;
+  }
+
+  // ── Generic query console — works against either table ──────────────────
+  if (url.pathname === '/syslite/query' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { table, filter, limit } = JSON.parse(body || '{}');
+        let result;
+        if (table === 'peak_events' && getPeaksTable) {
+          result = getPeaksTable().query(filter ?? '', limit ?? 100);
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unknown table. Available: peak_events' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === '/syslite/tables' && getPeaksTable) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify([
+      { name: 'metrics', description: 'Live system metrics (CPU/GPU/memory), 48-byte fixed records', builtin: true },
+      { name: 'peak_events', description: 'Session-high events for CPU/GPU load and temp', meta: getPeaksTable().getMeta() },
+    ]));
+    return;
+  }
+
   if (url.pathname === '/events' && getEvents) {
     const limit = parseInt(url.searchParams.get('limit') ?? '50');
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -165,10 +303,10 @@ httpServer.listen(config.wsPort, '127.0.0.1', () => {
   }
 
   if (!IS_SETUP) {
-    pruneOlderThan?.(7);
     pruneEvents?.();
     logEvent?.('backend_start', 'Backend started');
-    setInterval(() => pruneOlderThan?.(7), 24 * 60 * 60 * 1000);
+    // Auto-prune removed — data is now kept indefinitely by default.
+    // Manual pruning is still available via the /syslite Maintenance page.
   }
 });
 
@@ -332,6 +470,14 @@ async function collectAndBroadcast() {
     timestamp: now,
   };
   metrics.alerts = checkAlerts(metrics);
+
+  // Track peak events (new session highs) — feeds the SYS.LITE peak_events table
+  if (recordIfPeak) {
+    recordIfPeak('cpu_load', cpu.load ?? null);
+    recordIfPeak('cpu_temp', hwinfo?.cpu?.packageTemp ?? null);
+    recordIfPeak('gpu_load', hwinfo?.gpu?.load ?? null);
+    recordIfPeak('gpu_temp', hwinfo?.gpu?.temp ?? null);
+  }
 
   // Log alert state transitions (only on change, not every tick)
   const currentAlertTypes = new Set(metrics.alerts.map((a: Alert) => a.type));

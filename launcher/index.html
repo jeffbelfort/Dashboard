@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SYS.MONITOR Launcher</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0c0a;
+    color: #c8d8c0;
+    font-family: 'Consolas', 'JetBrains Mono', monospace;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #0a0c0a; }
+  ::-webkit-scrollbar-thumb { background: #2a3a2a; }
+
+  .header {
+    padding: 16px 20px;
+    border-bottom: 1px solid #1e2e1e;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .title {
+    font-size: 16px;
+    letter-spacing: 0.2em;
+    color: #4ade80;
+    text-shadow: 0 0 12px rgba(74,222,128,0.3);
+  }
+  .status-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #ef4444;
+    transition: all 0.3s;
+  }
+  .status-dot.on {
+    background: #4ade80;
+    box-shadow: 0 0 6px #4ade80;
+  }
+  .status-label {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: #5a7a5a;
+  }
+
+  .body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    gap: 16px;
+    overflow: hidden;
+  }
+
+  .setup-banner {
+    display: none;
+    border: 1px solid #fbbf24;
+    background: rgba(251,191,36,0.08);
+    padding: 12px 16px;
+    font-size: 11px;
+    color: #fbbf24;
+  }
+  .setup-banner.show { display: block; }
+  .setup-banner button {
+    margin-top: 8px;
+    display: block;
+  }
+
+  .buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  button {
+    background: none;
+    border: 1px solid #2a3a2a;
+    color: #c8d8c0;
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    padding: 12px 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+  }
+  button:hover { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,0.05); }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: 0.35; cursor: default; }
+  button:disabled:hover { border-color: #2a3a2a; color: #c8d8c0; background: none; }
+
+  button.primary { border-color: #4ade80; color: #4ade80; grid-column: span 2; }
+  button.danger { border-color: #ef444440; color: #ef4444; }
+  button.danger:hover { border-color: #ef4444; background: rgba(239,68,68,0.08); }
+
+  .log-panel {
+    flex: 1;
+    background: #0d100d;
+    border: 1px solid #1e2e1e;
+    padding: 10px 12px;
+    font-size: 10px;
+    line-height: 1.6;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #5a7a5a;
+  }
+  .log-line.backend { color: #4ade80; }
+  .log-line.frontend { color: #22d3ee; }
+  .log-line.system { color: #fbbf24; }
+  .log-line.build { color: #a78bfa; }
+  .log-line.install { color: #c8d8c0; }
+
+  .footer {
+    padding: 8px 20px;
+    border-top: 1px solid #1e2e1e;
+    font-size: 9px;
+    color: #3a5a3a;
+    letter-spacing: 0.1em;
+  }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <span class="title">SYS.MONITOR</span>
+    <div class="status-row">
+      <div class="status-row">
+        <div class="status-dot" id="backend-dot"></div>
+        <span class="status-label">BACKEND</span>
+      </div>
+      <div class="status-row">
+        <div class="status-dot" id="frontend-dot"></div>
+        <span class="status-label">FRONTEND</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="setup-banner" id="setup-banner">
+      First time here — dependencies need installing before you can start the dashboard.
+      <button id="btn-first-setup">RUN FIRST TIME SETUP</button>
+    </div>
+
+    <div class="buttons">
+      <button class="primary" id="btn-start">▶ START DASHBOARD</button>
+      <button class="danger" id="btn-stop">■ STOP DASHBOARD</button>
+      <button id="btn-open">↗ OPEN DASHBOARD</button>
+      <button id="btn-syslite">↗ OPEN SYS.LITE</button>
+      <button id="btn-rebuild" style="grid-column: span 2;">⟳ REBUILD FRONTEND</button>
+    </div>
+
+    <div class="log-panel" id="log"></div>
+  </div>
+
+  <div class="footer">Runs SYS.MONITOR locally · 127.0.0.1 only</div>
+
+<script src="renderer.js"></script>
+</body>
+</html>

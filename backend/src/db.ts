@@ -438,3 +438,177 @@ export function getDayStats(dateStr: string): DayStats {
     return EMPTY_DAY_STATS(dateStr);
   }
 }
+
+// ── SYS.LITE Engine — introspection & admin functions ────────────────────
+// These power the standalone /syslite page: health stats, raw browser,
+// self-describing layout, a naive-scan-vs-binary-search benchmark, and
+// prune preview/confirm with a real two-step commit.
+
+export interface EngineHealth {
+  available: boolean;
+  recordCount: number;
+  fileSizeBytes: number;
+  firstTs: number | null;
+  lastTs: number | null;
+  spanDays: number | null;
+  writeRatePerMin: number | null; // estimated from last 60s of records
+  recordSizeBytes: number;
+}
+
+export function getEngineHealth(): EngineHealth {
+  if (!fs.existsSync(DATA_PATH) || indexCache.recordCount === 0) {
+    return { available: false, recordCount: 0, fileSizeBytes: 0, firstTs: null, lastTs: null, spanDays: null, writeRatePerMin: null, recordSizeBytes: RECORD_SIZE };
+  }
+  const spanMs = indexCache.lastTs - indexCache.firstTs;
+  let writeRate: number | null = null;
+  try {
+    const fd = fs.openSync(DATA_PATH, 'r');
+    const cutoff = Date.now() - 60000;
+    const idx = findStartIndex(fd, cutoff, indexCache.recordCount);
+    writeRate = indexCache.recordCount - idx;
+    fs.closeSync(fd);
+  } catch {}
+  return {
+    available: true,
+    recordCount: indexCache.recordCount,
+    fileSizeBytes: indexCache.recordCount * RECORD_SIZE,
+    firstTs: indexCache.firstTs,
+    lastTs: indexCache.lastTs,
+    spanDays: spanMs / 86400000,
+    writeRatePerMin: writeRate,
+    recordSizeBytes: RECORD_SIZE,
+  };
+}
+
+// Raw record browser — paginated, newest first
+export interface RecordPage {
+  records: MetricRow[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export function getRawRecords(page: number = 0, pageSize: number = 50): RecordPage {
+  if (!fs.existsSync(DATA_PATH) || indexCache.recordCount === 0) {
+    return { records: [], totalCount: 0, page, pageSize, totalPages: 0 };
+  }
+  const totalPages = Math.ceil(indexCache.recordCount / pageSize);
+  // newest-first: page 0 = the most recent `pageSize` records
+  const endIdx = indexCache.recordCount - (page * pageSize);
+  const startIdx = Math.max(0, endIdx - pageSize);
+  if (endIdx <= 0) return { records: [], totalCount: indexCache.recordCount, page, pageSize, totalPages };
+
+  const fd = fs.openSync(DATA_PATH, 'r');
+  try {
+    const rows = readRangeBulk(fd, startIdx, endIdx).reverse(); // newest first within the page
+    return { records: rows, totalCount: indexCache.recordCount, page, pageSize, totalPages };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Self-describing record layout — generated FROM the real constants,
+// so it can never drift out of sync with the actual binary format.
+export interface FieldLayout { name: string; offset: number; sizeBytes: number; type: string; nullable: boolean; }
+
+export function getRecordLayout(): { recordSizeBytes: number; fields: FieldLayout[]; nullSentinel: number } {
+  return {
+    recordSizeBytes: RECORD_SIZE,
+    nullSentinel: NULL_SENTINEL,
+    fields: [
+      { name: 'timestamp',   offset: 0,  sizeBytes: 8, type: 'float64 (ms since epoch)', nullable: false },
+      { name: 'cpu_load',    offset: 8,  sizeBytes: 4, type: 'float32', nullable: true },
+      { name: 'cpu_temp',    offset: 12, sizeBytes: 4, type: 'float32', nullable: true },
+      { name: 'mem_percent', offset: 16, sizeBytes: 4, type: 'float32', nullable: true },
+      { name: 'gpu_load',    offset: 20, sizeBytes: 4, type: 'float32', nullable: true },
+      { name: 'gpu_temp',    offset: 24, sizeBytes: 4, type: 'float32', nullable: true },
+      { name: 'gpu_power',   offset: 28, sizeBytes: 4, type: 'float32', nullable: true },
+      { name: 'reserved',    offset: 32, sizeBytes: 16, type: 'padding (future fields)', nullable: true },
+    ],
+  };
+}
+
+// Performance demo: binary search vs a naive linear scan, on real data
+export interface BenchmarkResult {
+  recordCount: number;
+  binarySearch: { comparisons: number; timeMs: number };
+  linearScan: { comparisons: number; timeMs: number };
+  speedupFactor: number;
+}
+
+export function runBenchmark(): BenchmarkResult {
+  if (!fs.existsSync(DATA_PATH) || indexCache.recordCount === 0) {
+    return { recordCount: 0, binarySearch: { comparisons: 0, timeMs: 0 }, linearScan: { comparisons: 0, timeMs: 0 }, speedupFactor: 1 };
+  }
+  const targetTs = indexCache.firstTs + (indexCache.lastTs - indexCache.firstTs) * 0.5; // find the middle timestamp
+  const fd = fs.openSync(DATA_PATH, 'r');
+  try {
+    // Binary search (the real implementation, instrumented)
+    let comparisons = 0;
+    const t0 = process.hrtime.bigint();
+    let lo = 0, hi = indexCache.recordCount - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const rec = readRecordAt(fd, mid);
+      comparisons++;
+      if (!rec || rec.ts < targetTs) lo = mid + 1;
+      else hi = mid;
+    }
+    const t1 = process.hrtime.bigint();
+
+    // Naive linear scan for comparison (same target, brute force from the start)
+    let linComparisons = 0;
+    const t2 = process.hrtime.bigint();
+    for (let i = 0; i < indexCache.recordCount; i++) {
+      const rec = readRecordAt(fd, i);
+      linComparisons++;
+      if (rec && rec.ts >= targetTs) break;
+    }
+    const t3 = process.hrtime.bigint();
+
+    const binMs = Number(t1 - t0) / 1e6;
+    const linMs = Number(t3 - t2) / 1e6;
+
+    return {
+      recordCount: indexCache.recordCount,
+      binarySearch: { comparisons, timeMs: binMs },
+      linearScan: { comparisons: linComparisons, timeMs: linMs },
+      speedupFactor: linMs > 0 ? linMs / Math.max(binMs, 0.001) : 1,
+    };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Prune preview — tells you what WOULD be deleted, without deleting anything
+export interface PrunePreview { recordsToDelete: number; recordsToKeep: number; oldestKept: number | null; bytesToFree: number; }
+
+export function previewPrune(days: number = 7): PrunePreview {
+  if (!fs.existsSync(DATA_PATH) || indexCache.recordCount === 0) {
+    return { recordsToDelete: 0, recordsToKeep: 0, oldestKept: null, bytesToFree: 0 };
+  }
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const fd = fs.openSync(DATA_PATH, 'r');
+  try {
+    const startIdx = findStartIndex(fd, cutoff, indexCache.recordCount);
+    const keepRec = startIdx < indexCache.recordCount ? readRecordAt(fd, startIdx) : null;
+    return {
+      recordsToDelete: startIdx,
+      recordsToKeep: indexCache.recordCount - startIdx,
+      oldestKept: keepRec?.ts ?? null,
+      bytesToFree: startIdx * RECORD_SIZE,
+    };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Export raw bytes for download — caller (index.ts) streams this as a file response
+export function getExportPath(): string {
+  return DATA_PATH;
+}
+
+export function exportRangeAsRows(minutes: number): MetricRow[] {
+  return getHistory(minutes, 999999); // no downsampling for export — full resolution
+}

@@ -1370,6 +1370,39 @@ function SettingsDrawer({ settings, onUpdate, onClose, currentPageIdx }: {
 }
 
 // ── Add Widget Panel ───────────────────────────────────────────────────────
+function ToolsMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (open && ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div style={{ position:'relative' }} ref={ref}>
+      <button onClick={() => setOpen(v=>!v)} style={{ fontSize:'9px', color:open?C.green:C.textMuted, letterSpacing:'0.15em', background:'none', border:`1px solid ${open?C.green:C.border}`, padding:'4px 8px', cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s' }}>⋯</button>
+      {open && (
+        <div style={{ position:'absolute', top:'100%', right:0, marginTop:'4px', background:C.bgCard, border:`1px solid ${C.borderMid}`, padding:'6px', zIndex:100, minWidth:'150px', boxShadow:'0 8px 24px #00000060', display:'flex', flexDirection:'column', gap:'2px' }}>
+          <a href="/setup" style={{ display:'block', padding:'6px 8px', fontSize:'9px', color:C.text, fontFamily:'monospace', letterSpacing:'0.1em', textDecoration:'none' }}
+            onMouseEnter={e => e.currentTarget.style.background = C.greenFaint}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            ⚙ RE-RUN SETUP
+          </a>
+          <a href="/syslite" style={{ display:'block', padding:'6px 8px', fontSize:'9px', color:C.text, fontFamily:'monospace', letterSpacing:'0.1em', textDecoration:'none' }}
+            onMouseEnter={e => e.currentTarget.style.background = C.greenFaint}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            ▤ SYS.LITE ENGINE
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddWidgetPanel({ visible, onAdd, onClose }: { visible: Record<WidgetKey, boolean>; onAdd: (k: WidgetKey) => void; onClose: () => void; }) {
   const hidden = ALL_WIDGETS.filter(k => !visible[k]);
   return (
@@ -1613,6 +1646,7 @@ export default function Dashboard() {
             <span style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>{metrics ? new Date(metrics.timestamp).toLocaleTimeString() : '—'}</span>
             <button onClick={() => setShowAddWidget(v=>!v)} style={{ fontSize:'9px', color:showAddWidget?C.green:C.textMuted, letterSpacing:'0.15em', background:'none', border:`1px solid ${showAddWidget?C.green:C.border}`, padding:'4px 8px', cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s' }}>+</button>
             <button onClick={() => setShowSettings(v=>!v)} style={{ fontSize:'9px', color:showSettings?C.green:C.textMuted, letterSpacing:'0.15em', background:'none', border:`1px solid ${showSettings?C.green:C.border}`, padding:'4px 8px', cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s' }}>⚙</button>
+            <ToolsMenu/>
             {showAddWidget && <AddWidgetPanelM visible={currentPage.visible} onAdd={addWidget} onClose={()=>setShowAddWidget(false)}/>}
           </div>
         </div>

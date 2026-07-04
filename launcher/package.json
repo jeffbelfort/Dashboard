@@ -1,0 +1,28 @@
+{
+  "name": "sysmonitor-launcher",
+  "version": "1.0.0",
+  "description": "Launcher for SYS.MONITOR",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.sysmonitor.launcher",
+    "productName": "SYS.MONITOR Launcher",
+    "win": {
+      "target": "portable",
+      "icon": "icon.ico"
+    },
+    "files": [
+      "main.js",
+      "index.html",
+      "renderer.js",
+      "preload.js"
+    ]
+  }
+}

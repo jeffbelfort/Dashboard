@@ -10,3 +10,6 @@ frontend/.next/
 backend/history.bin
 backend/history.idx.json
 backend/events.jsonl
+
+backend/peak_events.tbl
+backend/peak_events.tbl.meta.json
