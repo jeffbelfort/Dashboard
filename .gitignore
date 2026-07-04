@@ -6,3 +6,7 @@ dist/
 backend/src/config.ts
 
 frontend/.next/
+
+backend/history.bin
+backend/history.idx.json
+backend/events.jsonl

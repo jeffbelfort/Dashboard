@@ -29,6 +29,12 @@ interface HwinfoData {
     packageTemp: number | null;
     power: number | null;
     coreTemps: { label: string; temp: number }[];
+    coreClocks: { label: string; mhz: number }[];
+    coreRatios: { label: string; ratio: number }[];
+    coreVids: { label: string; volts: number }[];
+    coreEffective: { label: string; mhz: number }[];
+    vcore: number | null;
+    pchTemp: number | null;
   };
   gpu: {
     temp: number | null;
@@ -41,6 +47,7 @@ interface HwinfoData {
     power: number | null;
     fanRpm: number | null;
     fanPct: number | null;
+    coreVoltage: number | null;
   };
   fans: { cpuFanRpm: number | null };
 }
@@ -53,7 +60,7 @@ interface Metrics {
 }
 interface HistoryPoint { t: number; cpu: number; mem: number; gpuLoad: number; gpuTemp: number; cpuTemp: number; }
 
-type WidgetKey = 'clock' | 'weather' | 'cpu' | 'cpuGraph' | 'memory' | 'memGraph' | 'gpu' | 'gpuGraph' | 'disk' | 'processes' | 'network' | 'docker' | 'spotify' | 'temps' | 'alerts' | 'hwinfo';
+type WidgetKey = 'clock' | 'weather' | 'cpu' | 'cpuGraph' | 'memory' | 'memGraph' | 'gpu' | 'gpuGraph' | 'disk' | 'processes' | 'network' | 'docker' | 'spotify' | 'temps' | 'alerts' | 'hwinfo' | 'eventLog' | 'dailyCompare' | 'dayCompare' | 'cpuClocks' | 'cpuVoltages' | 'effectiveClock';
 
 interface PageConfig {
   id: string;
@@ -92,7 +99,7 @@ const IGNORED_PROCS = ['system idle process', 'idle'];
 const STORAGE_KEY = 'sysmonitor-v6';
 const HISTORY_LEN = 60;
 
-const ALL_WIDGETS: WidgetKey[] = ['clock','weather','cpu','cpuGraph','memory','memGraph','gpu','gpuGraph','disk','processes','network','docker','spotify','temps','alerts','hwinfo'];
+const ALL_WIDGETS: WidgetKey[] = ['clock','weather','cpu','cpuGraph','memory','memGraph','gpu','gpuGraph','disk','processes','network','docker','spotify','temps','alerts','hwinfo','eventLog','dailyCompare','dayCompare','cpuClocks','cpuVoltages','effectiveClock'];
 
 const WIDGET_META: Record<WidgetKey, { label: string; accent: string }> = {
   clock:    { label: 'CLOCK',      accent: C.greenDim },
@@ -111,6 +118,12 @@ const WIDGET_META: Record<WidgetKey, { label: string; accent: string }> = {
   temps:    { label: 'TEMPS & FANS', accent: C.red },
   alerts:   { label: 'ALERTS',     accent: C.red },
   hwinfo:   { label: 'HWINFO',      accent: C.cyan },
+  eventLog: { label: 'EVENT LOG',   accent: C.amber },
+  dailyCompare: { label: 'TODAY VS 7D AVG', accent: C.purple },
+  dayCompare: { label: 'DAY VS DAY', accent: C.cyan },
+  cpuClocks: { label: 'CPU CLOCKS', accent: C.green },
+  cpuVoltages: { label: 'CPU VOLTAGES', accent: C.amber },
+  effectiveClock: { label: 'EFFECTIVE CLOCK', accent: C.cyan },
 };
 
 const makeDefaultVisible = (on: WidgetKey[]): Record<WidgetKey, boolean> =>
@@ -142,8 +155,14 @@ const DEFAULT_PAGE_2: PageConfig = {
     { i: 'spotify',  x: 4, y: 12, w: 4, h: 6, minW:2, minH:3 },
     { i: 'alerts',   x: 8, y: 12, w: 4, h: 6, minW:2, minH:3 },
     { i: 'hwinfo',   x: 0, y: 18, w: 6, h: 8, minW:2, minH:3 },
+    { i: 'eventLog', x: 6, y: 18, w: 3, h: 8, minW:2, minH:3 },
+    { i: 'dailyCompare', x: 9, y: 18, w: 3, h: 8, minW:2, minH:3 },
+    { i: 'dayCompare', x: 0, y: 26, w: 6, h: 8, minW:2, minH:3 },
+    { i: 'cpuClocks', x: 6, y: 26, w: 3, h: 10, minW:2, minH:3 },
+    { i: 'cpuVoltages', x: 9, y: 26, w: 3, h: 10, minW:2, minH:3 },
+    { i: 'effectiveClock', x: 0, y: 34, w: 6, h: 10, minW:2, minH:3 },
   ],
-  visible: makeDefaultVisible(['cpuGraph','memGraph','gpuGraph','network','temps','spotify','alerts','hwinfo']),
+  visible: makeDefaultVisible(['cpuGraph','memGraph','gpuGraph','network','temps','spotify','alerts','hwinfo','eventLog','dailyCompare','dayCompare','cpuClocks','cpuVoltages','effectiveClock']),
 };
 
 const DEFAULT_SETTINGS: DashSettings = {
@@ -364,13 +383,69 @@ function CpuContent({ data }: { data:CpuData|null }) {
   );
 }
 
+
+// ── Time range selector for history graphs ──────────────────────────────────
+type RangeKey = 'live' | '1h' | '6h' | '24h' | '7d';
+const RANGE_LABELS: Record<RangeKey, string> = { live: 'LIVE', '1h': '1H', '6h': '6H', '24h': '24H', '7d': '7D' };
+
+function useRangedHistory(liveHistory: HistoryPoint[]) {
+  const [range, setRange] = useState<RangeKey>('live');
+  const [fetched, setFetched] = useState<HistoryPoint[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (range === 'live') { setFetched(null); return; }
+    setLoading(true);
+    fetch(`http://127.0.0.1:3001/history?range=${range}&points=200`)
+      .then(r => r.json())
+      .then((rows: any[]) => {
+        const pts: HistoryPoint[] = rows.map(r => ({
+          t: r.ts, cpu: r.cpu_load ?? 0, mem: r.mem_percent ?? 0,
+          gpuLoad: r.gpu_load ?? 0, gpuTemp: r.gpu_temp ?? 0, cpuTemp: r.cpu_temp ?? 0,
+        }));
+        setFetched(pts);
+      })
+      .catch(() => setFetched([]))
+      .finally(() => setLoading(false));
+  }, [range]);
+
+  const data = range === 'live' ? liveHistory : (fetched ?? []);
+  return { range, setRange, data, loading };
+}
+
+function RangeButtons({ range, onChange }: { range: RangeKey; onChange: (r: RangeKey) => void }) {
+  return (
+    <div style={{ display:'flex', gap:'2px' }}>
+      {(Object.keys(RANGE_LABELS) as RangeKey[]).map(r => (
+        <button
+          key={r}
+          onClick={() => onChange(r)}
+          style={{
+            fontSize:'7px', padding:'2px 5px', letterSpacing:'0.08em',
+            background: range===r ? `${C.green}20` : 'none',
+            border:`1px solid ${range===r ? C.green : C.border}`,
+            color: range===r ? C.green : C.textMuted,
+            cursor:'pointer', fontFamily:'monospace', transition:'all 0.15s',
+          }}
+        >{RANGE_LABELS[r]}</button>
+      ))}
+    </div>
+  );
+}
+
 function CpuGraphContent({ history }: { history:HistoryPoint[] }) {
+  const { range, setRange, data, loading } = useRangedHistory(history);
   return (
     <div style={{ height:'100%', display:'flex', flexDirection:'column', gap:'4px' }}>
-      <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.12em', fontFamily:'monospace', flexShrink:0 }}>CPU LOAD % — LAST 60 SAMPLES</div>
-      <div style={{ flex:1, minHeight:0 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
+        <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.12em', fontFamily:'monospace' }}>
+          CPU LOAD % {range==='live' ? '— LIVE' : `— LAST ${RANGE_LABELS[range]}`}{loading ? ' ...' : ''}
+        </div>
+        <RangeButtons range={range} onChange={setRange}/>
+      </div>
+      <div style={{ flex:1, minHeight:'90px' }}>
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={history} margin={{top:4,right:4,left:-20,bottom:0}}>
+          <AreaChart data={data} margin={{top:4,right:4,left:-20,bottom:0}}>
             <defs>
               <linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={C.green} stopOpacity={0.25}/>
@@ -407,12 +482,18 @@ function MemContent({ data }: { data:MemData|null }) {
 }
 
 function MemGraphContent({ history }: { history:HistoryPoint[] }) {
+  const { range, setRange, data, loading } = useRangedHistory(history);
   return (
     <div style={{ height:'100%', display:'flex', flexDirection:'column', gap:'4px' }}>
-      <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.12em', fontFamily:'monospace', flexShrink:0 }}>MEMORY USAGE % — LAST 60 SAMPLES</div>
-      <div style={{ flex:1, minHeight:0 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
+        <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.12em', fontFamily:'monospace' }}>
+          MEMORY USAGE % {range==='live' ? '— LIVE' : `— LAST ${RANGE_LABELS[range]}`}{loading ? ' ...' : ''}
+        </div>
+        <RangeButtons range={range} onChange={setRange}/>
+      </div>
+      <div style={{ flex:1, minHeight:'90px' }}>
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={history} margin={{top:4,right:4,left:-20,bottom:0}}>
+          <AreaChart data={data} margin={{top:4,right:4,left:-20,bottom:0}}>
             <defs>
               <linearGradient id="mg" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={C.purple} stopOpacity={0.25}/>
@@ -465,15 +546,21 @@ function GpuContent({ data }: { data:GpuData|null }) {
 }
 
 function GpuGraphContent({ history }: { history:HistoryPoint[] }) {
+  const { range, setRange, data, loading } = useRangedHistory(history);
   return (
     <div style={{ height:'100%', display:'flex', flexDirection:'column', gap:'4px' }}>
-      <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.12em', fontFamily:'monospace', flexShrink:0 }}>GPU LOAD & TEMP — LAST 60 SAMPLES</div>
-      <div style={{ flex:1, minHeight:0 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
+        <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.12em', fontFamily:'monospace' }}>
+          GPU LOAD & TEMP {range==='live' ? '— LIVE' : `— LAST ${RANGE_LABELS[range]}`}{loading ? ' ...' : ''}
+        </div>
+        <RangeButtons range={range} onChange={setRange}/>
+      </div>
+      <div style={{ flex:1, minHeight:'90px' }}>
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={history} margin={{top:4,right:4,left:-20,bottom:0}}>
+          <LineChart data={data} margin={{top:4,right:4,left:-20,bottom:0}}>
             <CartesianGrid strokeDasharray="2 6" stroke={C.greenFaint} vertical={false}/>
             <XAxis dataKey="t" hide/>
-            <YAxis tick={{fontSize:8,fill:C.greenMuted,fontFamily:'monospace'}} tickLine={false} axisLine={false}/>
+            <YAxis domain={[0, 'auto']} tick={{fontSize:8,fill:C.greenMuted,fontFamily:'monospace'}} tickLine={false} axisLine={false}/>
             <Tooltip content={<ChartTip/>}/>
             <Line type="monotone" dataKey="gpuLoad" stroke={C.orange} strokeWidth={1.5} dot={false} name="Load%" isAnimationActive={false}/>
             <Line type="monotone" dataKey="gpuTemp" stroke={C.red} strokeWidth={1.5} dot={false} name="Temp°C" isAnimationActive={false}/>
@@ -715,6 +802,413 @@ function AlertsContent({ alerts }: { alerts: AlertData[] }) {
 }
 
 
+// ── Event Log Widget ─────────────────────────────────────────────────────
+interface EventEntry { ts: number; type: string; message: string; }
+
+const EVENT_ICONS: Record<string, { icon: string; color: string }> = {
+  backend_start:        { icon: '▶', color: C.green },
+  alert_fired:          { icon: '⚠', color: C.red },
+  alert_cleared:        { icon: '✓', color: C.green },
+  spotify_connected:    { icon: '♪', color: C.cyan },
+  spotify_disconnected: { icon: '♪', color: C.textMuted },
+  setup_completed:      { icon: '⚙', color: C.amber },
+};
+
+function relTime(ts: number): string {
+  const diff = Date.now() - ts;
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function EventLogContent() {
+  const [events, setEvents] = useState<EventEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchEvents = () => {
+      fetch('http://127.0.0.1:3001/events?limit=30')
+        .then(r => r.json())
+        .then(setEvents)
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    };
+    fetchEvents();
+    const interval = setInterval(fetchEvents, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading) return <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>LOADING...</div>;
+  if (!events.length) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'4px' }}>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO EVENTS YET</div>
+    </div>
+  );
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'0px', height:'100%', overflow:'auto' }}>
+      {events.map((e, i) => {
+        const meta = EVENT_ICONS[e.type] ?? { icon:'•', color:C.textMuted };
+        return (
+          <div key={i} style={{ display:'flex', alignItems:'flex-start', gap:'8px', padding:'6px 0', borderBottom: i < events.length-1 ? `1px solid ${C.greenFaint}` : 'none' }}>
+            <span style={{ fontSize:'10px', color:meta.color, flexShrink:0, width:'12px', textAlign:'center' }}>{meta.icon}</span>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:'9px', color:C.text, fontFamily:'monospace' }}>{e.message}</div>
+              <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', marginTop:'2px' }}>{relTime(e.ts)}</div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Daily Comparison Widget ──────────────────────────────────────────────
+interface DayAggregate { avg: number | null; max: number | null; }
+interface DailyComparison {
+  cpu_load: { today: DayAggregate; weekAvg: DayAggregate };
+  cpu_temp: { today: DayAggregate; weekAvg: DayAggregate };
+  mem_percent: { today: DayAggregate; weekAvg: DayAggregate };
+  gpu_load: { today: DayAggregate; weekAvg: DayAggregate };
+  gpu_temp: { today: DayAggregate; weekAvg: DayAggregate };
+  sampleCount: { today: number; week: number };
+}
+
+function CompareRow({ label, unit, today, weekAvg, higherIsBad = true }: {
+  label: string; unit: string; today: DayAggregate; weekAvg: DayAggregate; higherIsBad?: boolean;
+}) {
+  if (today.avg == null || weekAvg.avg == null) {
+    return (
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'6px 0', borderBottom:`1px solid ${C.greenFaint}` }}>
+        <span style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>{label}</span>
+        <span style={{ fontSize:'9px', color:C.textMuted, fontFamily:'monospace' }}>not enough data</span>
+      </div>
+    );
+  }
+
+  const diff = today.avg - weekAvg.avg;
+  const pctDiff = weekAvg.avg !== 0 ? (diff / weekAvg.avg) * 100 : 0;
+  const isWorse = higherIsBad ? diff > 0 : diff < 0;
+  const arrow = diff > 0.1 ? '▲' : diff < -0.1 ? '▼' : '—';
+  const color = Math.abs(pctDiff) < 3 ? C.greenMuted : isWorse ? C.red : C.green;
+
+  return (
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 0', borderBottom:`1px solid ${C.greenFaint}` }}>
+      <div>
+        <div style={{ fontSize:'9px', color:C.text, fontFamily:'monospace' }}>{label}</div>
+        <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', marginTop:'2px' }}>
+          today {today.avg.toFixed(1)}{unit} · 7d avg {weekAvg.avg.toFixed(1)}{unit}
+        </div>
+      </div>
+      <div style={{ textAlign:'right' }}>
+        <span style={{ fontSize:'11px', color, fontFamily:'monospace' }}>{arrow} {Math.abs(pctDiff).toFixed(0)}%</span>
+      </div>
+    </div>
+  );
+}
+
+function DailyCompareContent() {
+  const [data, setData] = useState<DailyComparison | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchCompare = () => {
+      fetch('http://127.0.0.1:3001/history/compare')
+        .then(r => r.json())
+        .then(setData)
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    };
+    fetchCompare();
+    const interval = setInterval(fetchCompare, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading) return <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>LOADING...</div>;
+  if (!data || data.sampleCount.week < 10) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'4px' }}>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace', textAlign:'center' }}>NOT ENOUGH HISTORY YET</div>
+      <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', textAlign:'center' }}>Check back after a day or two</div>
+    </div>
+  );
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column' }}>
+      <CompareRow label="CPU LOAD" unit="%" today={data.cpu_load.today} weekAvg={data.cpu_load.weekAvg}/>
+      <CompareRow label="CPU TEMP" unit="°C" today={data.cpu_temp.today} weekAvg={data.cpu_temp.weekAvg}/>
+      <CompareRow label="MEMORY" unit="%" today={data.mem_percent.today} weekAvg={data.mem_percent.weekAvg}/>
+      <CompareRow label="GPU LOAD" unit="%" today={data.gpu_load.today} weekAvg={data.gpu_load.weekAvg}/>
+      <CompareRow label="GPU TEMP" unit="°C" today={data.gpu_temp.today} weekAvg={data.gpu_temp.weekAvg}/>
+    </div>
+  );
+}
+
+// ── Day Picker Comparison Widget ─────────────────────────────────────────
+interface DayOption { date: string; sampleCount: number; }
+interface DayStatsResp {
+  date: string; sampleCount: number;
+  cpu_load: DayAggregate; cpu_temp: DayAggregate; mem_percent: DayAggregate;
+  gpu_load: DayAggregate; gpu_temp: DayAggregate;
+}
+
+function fmtDateLabel(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const diffDays = Math.round((today.getTime() - date.getTime()) / 86400000);
+  if (diffDays === 0) return 'TODAY';
+  if (diffDays === 1) return 'YESTERDAY';
+  return date.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).toUpperCase();
+}
+
+function DaySelect({ value, onChange, options, exclude }: {
+  value: string; onChange: (v: string) => void; options: DayOption[]; exclude?: string;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      style={{
+        background: C.bgCardInner, border: `1px solid ${C.border}`, color: C.text,
+        fontSize: '9px', fontFamily: 'monospace', padding: '4px 6px', outline: 'none',
+        cursor: 'pointer', flex: 1,
+      }}
+    >
+      {options.filter(o => o.date !== exclude).map(o => (
+        <option key={o.date} value={o.date}>{fmtDateLabel(o.date)} ({o.sampleCount} samples)</option>
+      ))}
+    </select>
+  );
+}
+
+function DualCompareRow({ label, unit, a, b, labelA, labelB, higherIsBad = true }: {
+  label: string; unit: string; a: DayAggregate; b: DayAggregate; labelA: string; labelB: string; higherIsBad?: boolean;
+}) {
+  if (a.avg == null || b.avg == null) {
+    return (
+      <div style={{ display:'flex', justifyContent:'space-between', padding:'7px 0', borderBottom:`1px solid ${C.greenFaint}` }}>
+        <span style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>{label}</span>
+        <span style={{ fontSize:'9px', color:C.textMuted, fontFamily:'monospace' }}>no data</span>
+      </div>
+    );
+  }
+  const diff = a.avg - b.avg;
+  const pctDiff = b.avg !== 0 ? (diff / b.avg) * 100 : 0;
+  const isWorse = higherIsBad ? diff > 0 : diff < 0;
+  const arrow = diff > 0.1 ? '▲' : diff < -0.1 ? '▼' : '—';
+  const color = Math.abs(pctDiff) < 3 ? C.greenMuted : isWorse ? C.red : C.green;
+
+  return (
+    <div style={{ padding:'8px 0', borderBottom:`1px solid ${C.greenFaint}` }}>
+      <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'4px' }}>
+        <span style={{ fontSize:'9px', color:C.text, fontFamily:'monospace' }}>{label}</span>
+        <span style={{ fontSize:'10px', color, fontFamily:'monospace' }}>{arrow} {Math.abs(pctDiff).toFixed(0)}%</span>
+      </div>
+      <div style={{ display:'flex', justifyContent:'space-between' }}>
+        <span style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace' }}>{labelA}: {a.avg.toFixed(1)}{unit}</span>
+        <span style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace' }}>{labelB}: {b.avg.toFixed(1)}{unit}</span>
+      </div>
+    </div>
+  );
+}
+
+function DayCompareContent() {
+  const [days, setDays] = useState<DayOption[]>([]);
+  const [dateA, setDateA] = useState<string>('');
+  const [dateB, setDateB] = useState<string>('');
+  const [statsA, setStatsA] = useState<DayStatsResp | null>(null);
+  const [statsB, setStatsB] = useState<DayStatsResp | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch('http://127.0.0.1:3001/history/days')
+      .then(r => r.json())
+      .then((d: DayOption[]) => {
+        setDays(d);
+        if (d.length > 0) setDateA(d[0].date);
+        if (d.length > 1) setDateB(d[1].date);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (!dateA) return;
+    fetch(`http://127.0.0.1:3001/history/day?date=${dateA}`).then(r => r.json()).then(setStatsA).catch(() => {});
+  }, [dateA]);
+
+  useEffect(() => {
+    if (!dateB) return;
+    fetch(`http://127.0.0.1:3001/history/day?date=${dateB}`).then(r => r.json()).then(setStatsB).catch(() => {});
+  }, [dateB]);
+
+  if (loading) return <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>LOADING...</div>;
+  if (days.length < 2) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'4px' }}>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace', textAlign:'center' }}>NEED AT LEAST 2 DAYS OF DATA</div>
+      <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', textAlign:'center' }}>Check back tomorrow</div>
+    </div>
+  );
+
+  const labelA = dateA ? fmtDateLabel(dateA) : 'A';
+  const labelB = dateB ? fmtDateLabel(dateB) : 'B';
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'8px', height:'100%' }}>
+      <div style={{ display:'flex', gap:'6px' }}>
+        <DaySelect value={dateA} onChange={setDateA} options={days}/>
+        <DaySelect value={dateB} onChange={setDateB} options={days}/>
+      </div>
+      {statsA && statsB ? (
+        <div style={{ flex:1, overflow:'auto' }}>
+          <DualCompareRow label="CPU LOAD" unit="%" a={statsA.cpu_load} b={statsB.cpu_load} labelA={labelA} labelB={labelB}/>
+          <DualCompareRow label="CPU TEMP" unit="°C" a={statsA.cpu_temp} b={statsB.cpu_temp} labelA={labelA} labelB={labelB}/>
+          <DualCompareRow label="MEMORY" unit="%" a={statsA.mem_percent} b={statsB.mem_percent} labelA={labelA} labelB={labelB}/>
+          <DualCompareRow label="GPU LOAD" unit="%" a={statsA.gpu_load} b={statsB.gpu_load} labelA={labelA} labelB={labelB}/>
+          <DualCompareRow label="GPU TEMP" unit="°C" a={statsA.gpu_temp} b={statsB.gpu_temp} labelA={labelA} labelB={labelB}/>
+        </div>
+      ) : (
+        <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>LOADING DAYS...</div>
+      )}
+    </div>
+  );
+}
+
+// ── Shared: per-core bar row (used by clocks/voltages/effective widgets) ────
+function CoreBarRow({ label, value, max, unit, color, decimals = 0 }: {
+  label: string; value: number; max: number; unit: string; color: string; decimals?: number;
+}) {
+  const pct = Math.min((value / max) * 100, 100);
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'3px' }}>
+      <span style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace', width:'26px', flexShrink:0 }}>{label}</span>
+      <div style={{ flex:1, height:'10px', background:C.greenFaint, position:'relative' }}>
+        <div style={{ height:'100%', width:`${pct}%`, background:color, transition:'width 0.4s ease' }}/>
+      </div>
+      <span style={{ fontSize:'8px', color, fontFamily:'monospace', width:'52px', textAlign:'right', flexShrink:0 }}>
+        {value.toFixed(decimals)}{unit}
+      </span>
+    </div>
+  );
+}
+
+function coreShortLabel(label: string): string {
+  // "P-core 0" -> "P0", "E-core 12" -> "E12"
+  const m = label.match(/(P|E)-core (\d+)/i);
+  return m ? `${m[1].toUpperCase()}${m[2]}` : label.slice(0, 3);
+}
+
+// ── CPU Clocks Widget ────────────────────────────────────────────────────
+function CpuClocksContent({ data }: { data: HwinfoData | null }) {
+  if (!data || !data.available || !data.cpu.coreClocks?.length) return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO CLOCK DATA — REQUIRES HWINFO</div>
+    </div>
+  );
+
+  const maxClock = Math.max(...data.cpu.coreClocks.map(c => c.mhz), 5000);
+  const ratioMap = new Map(data.cpu.coreRatios?.map(r => [r.label.replace(' Ratio', '').replace(' [x]',''), r.ratio]) ?? []);
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', height:'100%', overflow:'auto' }}>
+      {data.cpu.coreClocks.map((c, i) => {
+        const shortLabel = coreShortLabel(c.label);
+        const isP = c.label.toLowerCase().startsWith('p');
+        const ratioKey = data.cpu.coreRatios?.find(r => r.label.startsWith(c.label.split(' Clock')[0]))?.ratio;
+        return (
+          <div key={i} style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'3px' }}>
+            <span style={{ fontSize:'8px', color: isP ? C.green : C.cyan, fontFamily:'monospace', width:'26px', flexShrink:0 }}>{shortLabel}</span>
+            <div style={{ flex:1, height:'10px', background:C.greenFaint, position:'relative' }}>
+              <div style={{ height:'100%', width:`${Math.min((c.mhz/maxClock)*100,100)}%`, background: isP ? C.green : C.cyan, transition:'width 0.4s ease' }}/>
+            </div>
+            <span style={{ fontSize:'8px', color:C.text, fontFamily:'monospace', width:'50px', textAlign:'right', flexShrink:0 }}>{c.mhz.toFixed(0)} MHz</span>
+            {ratioKey != null && <span style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', width:'34px', textAlign:'right', flexShrink:0 }}>x{ratioKey.toFixed(1)}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── CPU Voltages Widget ──────────────────────────────────────────────────
+function CpuVoltagesContent({ data }: { data: HwinfoData | null }) {
+  if (!data || !data.available || !data.cpu.coreVids?.length) return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO VOLTAGE DATA — REQUIRES HWINFO</div>
+    </div>
+  );
+
+  const maxV = Math.max(...data.cpu.coreVids.map(v => v.volts), 1.5);
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', height:'100%' }}>
+      {data.cpu.vcore != null && (
+        <div style={{ marginBottom:'8px', paddingBottom:'8px', borderBottom:`1px solid ${C.border}` }}>
+          <div style={{ fontSize:'8px', color:C.greenMuted, letterSpacing:'0.1em', fontFamily:'monospace' }}>VCORE</div>
+          <div style={{ fontSize:'16px', color:C.amber, fontFamily:'monospace' }}>{data.cpu.vcore.toFixed(3)}V</div>
+        </div>
+      )}
+      <div style={{ flex:1, overflow:'auto' }}>
+        {data.cpu.coreVids.map((v, i) => {
+          const shortLabel = coreShortLabel(v.label);
+          const isP = v.label.toLowerCase().startsWith('p');
+          return (
+            <div key={i} style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'3px' }}>
+              <span style={{ fontSize:'8px', color: isP ? C.green : C.cyan, fontFamily:'monospace', width:'26px', flexShrink:0 }}>{shortLabel}</span>
+              <div style={{ flex:1, height:'10px', background:C.greenFaint, position:'relative' }}>
+                <div style={{ height:'100%', width:`${Math.min((v.volts/maxV)*100,100)}%`, background:C.amber, transition:'width 0.4s ease' }}/>
+              </div>
+              <span style={{ fontSize:'8px', color:C.text, fontFamily:'monospace', width:'50px', textAlign:'right', flexShrink:0 }}>{v.volts.toFixed(3)}V</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Effective Clock Widget (nominal vs actual utilized frequency) ────────
+function EffectiveClockContent({ data }: { data: HwinfoData | null }) {
+  if (!data || !data.available || !data.cpu.coreEffective?.length) return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO EFFECTIVE CLOCK DATA</div>
+    </div>
+  );
+
+  const clockMap = new Map(data.cpu.coreClocks?.map(c => [c.label.split(' Clock')[0], c.mhz]) ?? []);
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', height:'100%', overflow:'auto' }}>
+      <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', marginBottom:'6px', lineHeight:1.5 }}>
+        Effective clock shows real utilized frequency. If far below nominal while under load, cores may be entering idle states unexpectedly.
+      </div>
+      {data.cpu.coreEffective.map((e, i) => {
+        const coreBase = e.label.replace(/ T\d.*/, '');
+        const nominal = clockMap.get(coreBase) ?? 0;
+        const shortLabel = coreShortLabel(e.label);
+        const isP = e.label.toLowerCase().startsWith('p');
+        const ratio = nominal > 0 ? (e.mhz / nominal) : 0;
+        const color = ratio < 0.3 ? C.red : ratio < 0.6 ? C.amber : (isP ? C.green : C.cyan);
+        return (
+          <div key={i} style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'3px' }}>
+            <span style={{ fontSize:'8px', color:C.greenMuted, fontFamily:'monospace', width:'34px', flexShrink:0 }}>{shortLabel}</span>
+            <div style={{ flex:1, height:'10px', background:C.greenFaint, position:'relative' }}>
+              <div style={{ height:'100%', width:`${Math.min((e.mhz/5500)*100,100)}%`, background:color, transition:'width 0.4s ease' }}/>
+            </div>
+            <span style={{ fontSize:'8px', color, fontFamily:'monospace', width:'50px', textAlign:'right', flexShrink:0 }}>{e.mhz.toFixed(0)} MHz</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function HwinfoContent({ data }: { data: HwinfoData | null }) {
   if (!data || !data.available) return (
     <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'8px' }}>
@@ -915,6 +1409,12 @@ const SpotifyContentM = memo(SpotifyContent);
 const TempsContentM = memo(TempsContent);
 const AlertsContentM = memo(AlertsContent);
 const HwinfoContentM = memo(HwinfoContent);
+const CpuClocksContentM = memo(CpuClocksContent);
+const CpuVoltagesContentM = memo(CpuVoltagesContent);
+const EffectiveClockContentM = memo(EffectiveClockContent);
+const EventLogContentM = memo(EventLogContent);
+const DailyCompareContentM = memo(DailyCompareContent);
+const DayCompareContentM = memo(DayCompareContent);
 const SettingsDrawerM = memo(SettingsDrawer);
 const AddWidgetPanelM = memo(AddWidgetPanel);
 export default function Dashboard() {
@@ -1055,6 +1555,12 @@ export default function Dashboard() {
       case 'temps':    return <TempsContentM cpuTemp={metrics?.cpuTemp ?? {main:null,cores:[],max:null}} fans={metrics?.fans??[]} gpu={metrics?.hwinfo?.available ? {model:'RTX 5070',load:metrics.hwinfo.gpu.load??0,memUsed:0,memTotal:0,memPercent:metrics.hwinfo.gpu.memUsagePct??0,temp:metrics.hwinfo.gpu.temp??0,powerDraw:metrics.hwinfo.gpu.power??null,powerLimit:250} : null}/>;
       case 'alerts':   return <AlertsContentM alerts={metrics?.alerts??[]}/>
       case 'hwinfo':   return <HwinfoContentM data={metrics?.hwinfo??null}/>;
+      case 'cpuClocks': return <CpuClocksContentM data={metrics?.hwinfo??null}/>;
+      case 'cpuVoltages': return <CpuVoltagesContentM data={metrics?.hwinfo??null}/>;
+      case 'effectiveClock': return <EffectiveClockContentM data={metrics?.hwinfo??null}/>;
+      case 'eventLog':     return <EventLogContentM/>;
+      case 'dailyCompare': return <DailyCompareContentM/>;
+      case 'dayCompare':   return <DayCompareContentM/>;
     }
   };
 

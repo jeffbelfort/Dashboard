@@ -13,9 +13,10 @@ from ctypes import Structure, c_uint32, c_double, c_char, c_longlong
 HWINFO_SENSORS_MAP_FILE_NAME = "Global\\HWiNFO_SENS_SM2"
 HWINFO_SENSORS_STRING_LEN    = 128
 HWINFO_UNIT_STRING_LEN       = 16
-POLL_INTERVAL                = 2.0  # seconds
+POLL_INTERVAL                = 1.0  # seconds
 
 TYPE_TEMP  = 1
+TYPE_VOLT  = 2
 TYPE_FAN   = 3
 TYPE_POWER = 5
 TYPE_CLOCK = 6
@@ -112,6 +113,35 @@ def read_snapshot(k, p):
            not any(x in rl for x in ["distance","throttl","critical","power","clock","vid","limit","ratio","residency","utility","usage","c0","c1","c6"]):
             core_temps.append({"label": r["label"], "temp": r["value"]})
 
+    # Per-core clock speed (nominal) + ratio/multiplier
+    core_clocks = []
+    for r in readings:
+        rl = r["label"].lower()
+        if r["type"] == TYPE_CLOCK and (rl.startswith("p-core") or rl.startswith("e-core")) and \
+           rl.endswith("clock") and "effective" not in rl:
+            core_clocks.append({"label": r["label"], "mhz": r["value"]})
+
+    core_ratios = []
+    for r in readings:
+        rl = r["label"].lower()
+        if (rl.startswith("p-core") or rl.startswith("e-core")) and "ratio" in rl:
+            core_ratios.append({"label": r["label"], "ratio": r["value"]})
+
+    # Per-core VID (voltage identifier — closest per-core voltage reading on modern Intel)
+    core_vids = []
+    for r in readings:
+        rl = r["label"].lower()
+        if r["type"] == TYPE_VOLT and (rl.startswith("p-core") or rl.startswith("e-core")) and "vid" in rl:
+            core_vids.append({"label": r["label"], "volts": r["value"]})
+
+    # Effective clock (T0 thread) — real utilized frequency vs nominal boost clock
+    core_effective = []
+    for r in readings:
+        rl = r["label"].lower()
+        if r["type"] == TYPE_CLOCK and (rl.startswith("p-core") or rl.startswith("e-core")) and \
+           "t0 effective clock" in rl:
+            core_effective.append({"label": r["label"], "mhz": r["value"]})
+
     return {
         "available": True,
         "cpu": {
@@ -119,6 +149,12 @@ def read_snapshot(k, p):
             "packageTemp": find("cpu package", TYPE_TEMP),
             "power":       find("cpu package power", TYPE_POWER),
             "coreTemps":   core_temps,
+            "coreClocks":  core_clocks,
+            "coreRatios":  core_ratios,
+            "coreVids":    core_vids,
+            "coreEffective": core_effective,
+            "vcore":       find("vcore", TYPE_VOLT),
+            "pchTemp":     find("pch temperature", TYPE_TEMP),
         },
         "gpu": {
             "temp":            find("gpu temperature", TYPE_TEMP),
@@ -131,6 +167,7 @@ def read_snapshot(k, p):
             "power":           find("gpu core (nvvdd) output power", TYPE_POWER),
             "fanRpm":          find("gpu fan1", TYPE_FAN),
             "fanPct":          find("gpu fan1", TYPE_USAGE),
+            "coreVoltage":     find("gpu core voltage", TYPE_VOLT),
         },
         "fans": {
             "cpuFanRpm": find("cpu fan", TYPE_FAN),

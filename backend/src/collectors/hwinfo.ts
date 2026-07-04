@@ -12,6 +12,12 @@ export interface HwinfoData {
     packageTemp: number | null;
     power: number | null;
     coreTemps: { label: string; temp: number }[];
+    coreClocks: { label: string; mhz: number }[];
+    coreRatios: { label: string; ratio: number }[];
+    coreVids: { label: string; volts: number }[];
+    coreEffective: { label: string; mhz: number }[];
+    vcore: number | null;
+    pchTemp: number | null;
   };
   gpu: {
     temp: number | null;
@@ -24,14 +30,15 @@ export interface HwinfoData {
     power: number | null;
     fanRpm: number | null;
     fanPct: number | null;
+    coreVoltage: number | null;
   };
   fans: { cpuFanRpm: number | null };
 }
 
 const EMPTY: HwinfoData = {
   available: false,
-  cpu: { tempAvg: null, packageTemp: null, power: null, coreTemps: [] },
-  gpu: { temp: null, memJunctionTemp: null, load: null, memLoad: null, memUsagePct: null, clockMhz: null, memClockMhz: null, power: null, fanRpm: null, fanPct: null },
+  cpu: { tempAvg: null, packageTemp: null, power: null, coreTemps: [], coreClocks: [], coreRatios: [], coreVids: [], coreEffective: [], vcore: null, pchTemp: null },
+  gpu: { temp: null, memJunctionTemp: null, load: null, memLoad: null, memUsagePct: null, clockMhz: null, memClockMhz: null, power: null, fanRpm: null, fanPct: null, coreVoltage: null },
   fans: { cpuFanRpm: null },
 };
 

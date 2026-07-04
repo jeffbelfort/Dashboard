@@ -19,7 +19,9 @@ let getDiskStats: any, getTopProcesses: any;
 let getSpotifyNowPlaying: any, spotifyControl: any;
 let getHwinfoData: any;
 let getAuthUrl: any, exchangeCode: any;
-let insertMetric: any, getHistory: any;
+let insertMetric: any, getHistory: any, getHistoryStats: any, pruneOlderThan: any, getDailyComparison: any;
+let getAvailableDays: any, getDayStats: any;
+let logEvent: any, getEvents: any, pruneEvents: any;
 
 if (!IS_SETUP) {
   ({ getCpuLoad } = require('./collectors/cpu'));
@@ -30,7 +32,8 @@ if (!IS_SETUP) {
   ({ getTopProcesses } = require('./collectors/processes'));
   ({ getHwinfoData } = require('./collectors/hwinfo'));
   ({ getSpotifyNowPlaying, spotifyControl, getAuthUrl, exchangeCode } = require('./collectors/spotify'));
-  ({ insertMetric, getHistory } = require('./db'));
+  ({ insertMetric, getHistory, getStats: getHistoryStats, pruneOlderThan, getDailyComparison, getAvailableDays, getDayStats } = require('./db'));
+  ({ logEvent, getEvents, pruneEvents } = require('./events'));
 }
 
 // ── HTTP server ────────────────────────────────────────────────────────────
@@ -85,6 +88,7 @@ const httpServer = http.createServer(async (req, res) => {
     const code = url.searchParams.get('code');
     if (code && exchangeCode) {
       const ok = await exchangeCode(code);
+      if (ok) logEvent?.('spotify_connected', 'Spotify account connected');
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(`<html><body style="background:#0a0c0a;color:#4ade80;font-family:monospace;padding:40px">
         <h2>${ok ? '&#10003; Spotify connected' : '&#10007; Auth failed'}</h2>
@@ -95,9 +99,48 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/history' && getHistory) {
-    const mins = parseInt(url.searchParams.get('minutes') ?? '60');
+    const RANGE_MINUTES: Record<string, number> = {
+      '1h': 60, '6h': 360, '24h': 1440, '7d': 10080,
+    };
+    const rangeParam = url.searchParams.get('range');
+    const mins = rangeParam
+      ? (RANGE_MINUTES[rangeParam] ?? 60)
+      : parseInt(url.searchParams.get('minutes') ?? '60');
+    const points = parseInt(url.searchParams.get('points') ?? '300');
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(getHistory(mins)));
+    res.end(JSON.stringify(getHistory(mins, points)));
+    return;
+  }
+
+  if (url.pathname === '/history/stats' && getHistoryStats) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getHistoryStats()));
+    return;
+  }
+
+  if (url.pathname === '/history/compare' && getDailyComparison) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getDailyComparison()));
+    return;
+  }
+
+  if (url.pathname === '/history/days' && getAvailableDays) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getAvailableDays()));
+    return;
+  }
+
+  if (url.pathname === '/history/day' && getDayStats) {
+    const date = url.searchParams.get('date') ?? '';
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getDayStats(date)));
+    return;
+  }
+
+  if (url.pathname === '/events' && getEvents) {
+    const limit = parseInt(url.searchParams.get('limit') ?? '50');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getEvents(limit)));
     return;
   }
 
@@ -119,6 +162,13 @@ httpServer.listen(config.wsPort, '127.0.0.1', () => {
   } else {
     console.log('Config loaded - dashboard ready');
     if (config.spotify?.enabled) console.log(`Spotify auth: http://127.0.0.1:${config.wsPort}/spotify/auth`);
+  }
+
+  if (!IS_SETUP) {
+    pruneOlderThan?.(7);
+    pruneEvents?.();
+    logEvent?.('backend_start', 'Backend started');
+    setInterval(() => pruneOlderThan?.(7), 24 * 60 * 60 * 1000);
   }
 });
 
@@ -232,7 +282,7 @@ async function refreshIfStale<T>(c: ThrottledCollector<T>): Promise<T> {
 
 const collectors = {
   // Cheap reads — every broadcast
-  hwinfo:  makeCollector('hwinfo',  2500,  () => getHwinfoData(), null as any),
+  hwinfo:  makeCollector('hwinfo',  1000,  () => getHwinfoData(), null as any),
   mem:     makeCollector('memory',  3000,  () => getMemStats(),   { used: 0, total: 0, percent: 0 }),
 
   // WMI-backed — throttled
@@ -251,6 +301,7 @@ const collectors = {
 // ── Global collection loop (ONE loop, broadcasts to ALL clients) ───────────
 let latestPayload: string | null = null;
 let dbTick = 0;
+let prevAlertTypes = new Set<string>();
 
 async function collectAndBroadcast() {
   const now = Date.now();
@@ -281,6 +332,16 @@ async function collectAndBroadcast() {
     timestamp: now,
   };
   metrics.alerts = checkAlerts(metrics);
+
+  // Log alert state transitions (only on change, not every tick)
+  const currentAlertTypes = new Set(metrics.alerts.map((a: Alert) => a.type));
+  for (const a of metrics.alerts) {
+    if (!prevAlertTypes.has(a.type)) logEvent?.('alert_fired', a.message);
+  }
+  for (const prevType of prevAlertTypes) {
+    if (!currentAlertTypes.has(prevType)) logEvent?.('alert_cleared', `${prevType.replace('_',' ')} back to normal`);
+  }
+  prevAlertTypes = currentAlertTypes;
 
   // Persist history every ~6s regardless of broadcast rate
   dbTick++;
