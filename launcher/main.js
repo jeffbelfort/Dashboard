@@ -4,8 +4,37 @@ const path = require('path');
 const fs = require('fs');
 
 // ── Project paths ────────────────────────────────────────────────────────
-// Assumes launcher/ sits alongside backend/ and frontend/ in the project root.
-const PROJECT_ROOT = path.resolve(__dirname, '..');
+// __dirname is only reliable when running via `npm start` (unpacked dev mode).
+// A packaged exe's __dirname points inside an internal app.asar bundle, not
+// a real filesystem folder — so we instead search near the actual exe's
+// location on disk for a folder containing both backend/ and frontend/.
+function looksLikeProjectRoot(dir) {
+  return fs.existsSync(path.join(dir, 'backend')) && fs.existsSync(path.join(dir, 'frontend'));
+}
+
+function findProjectRoot() {
+  if (!app.isPackaged) {
+    // Dev mode: launcher/ sits directly inside the real project folder
+    return path.resolve(__dirname, '..');
+  }
+
+  // Packaged as a "portable" exe: electron-builder self-extracts the app to a
+  // temp folder at runtime, so process.execPath points there, NOT to where
+  // the .exe actually sits on disk. electron-builder sets
+  // PORTABLE_EXECUTABLE_DIR specifically to give us the real location.
+  const realExeDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
+  const candidates = [
+    realExeDir,
+    path.resolve(realExeDir, '..'),
+    path.resolve(realExeDir, '..', '..'),
+  ];
+  for (const c of candidates) {
+    if (looksLikeProjectRoot(c)) return c;
+  }
+  return realExeDir;
+}
+
+const PROJECT_ROOT = findProjectRoot();
 const BACKEND_DIR = path.join(PROJECT_ROOT, 'backend');
 const FRONTEND_DIR = path.join(PROJECT_ROOT, 'frontend');
 
@@ -45,6 +74,19 @@ function runNpm(args, cwd, label) {
   });
 }
 
+// On Windows, killing a shell-spawned process (npm.cmd -> node.exe -> more
+// node processes) with .kill() only signals the top-level cmd.exe wrapper —
+// the actual server process underneath survives and keeps holding its port.
+// `taskkill /t` kills the entire process tree, not just the top process.
+function killTree(proc) {
+  if (!proc || proc.pid == null) return;
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(proc.pid), '/f', '/t']);
+  } else {
+    proc.kill();
+  }
+}
+
 function spawnPersistent(args, cwd, label) {
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const proc = spawn(npmCmd, args, { cwd, shell: true });
@@ -61,6 +103,10 @@ function spawnPersistent(args, cwd, label) {
 
 // ── IPC handlers ─────────────────────────────────────────────────────────
 ipcMain.handle('start-dashboard', async () => {
+  if (!looksLikeProjectRoot(PROJECT_ROOT)) {
+    sendLog('system', `✗ Could not find backend/frontend folders near ${PROJECT_ROOT}.\nMove this exe into your project folder (next to backend/ and frontend/) and try again.\n`);
+    return;
+  }
   if (backendProc || frontendProc) {
     sendLog('system', 'Dashboard already running.\n');
     return;
@@ -81,8 +127,8 @@ ipcMain.handle('start-dashboard', async () => {
 
 ipcMain.handle('stop-dashboard', async () => {
   sendLog('system', 'Stopping dashboard...\n');
-  if (backendProc) { backendProc.kill(); backendProc = null; }
-  if (frontendProc) { frontendProc.kill(); frontendProc = null; }
+  if (backendProc) { killTree(backendProc); backendProc = null; }
+  if (frontendProc) { killTree(frontendProc); frontendProc = null; }
   sendStatus();
 });
 
@@ -143,12 +189,15 @@ function createWindow() {
     },
   });
   mainWindow.loadFile('index.html');
+  mainWindow.webContents.once('did-finish-load', () => {
+    sendLog('system', `Project root: ${PROJECT_ROOT}${looksLikeProjectRoot(PROJECT_ROOT) ? ' (found ✓)' : ' (backend/frontend NOT found here)'}\n`);
+  });
 }
 
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
-  if (backendProc) backendProc.kill();
-  if (frontendProc) frontendProc.kill();
+  if (backendProc) killTree(backendProc);
+  if (frontendProc) killTree(frontendProc);
   if (process.platform !== 'darwin') app.quit();
 });
