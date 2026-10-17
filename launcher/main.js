@@ -38,6 +38,31 @@ const PROJECT_ROOT = findProjectRoot();
 const BACKEND_DIR = path.join(PROJECT_ROOT, 'backend');
 const FRONTEND_DIR = path.join(PROJECT_ROOT, 'frontend');
 
+// ── Bundled Node resolution ──────────────────────────────────────────────
+// A "Bob-proof" build ships a portable Node runtime under <exeDir>/node-runtime/
+// (see packaging step). In dev mode, or if that folder is missing, we fall
+// back to whatever `node` is on PATH so this doesn't break your own workflow.
+function findNodeBinary() {
+  if (app.isPackaged) {
+    const bundled = path.join(
+      process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath),
+      'node-runtime',
+      process.platform === 'win32' ? 'node.exe' : 'node'
+    );
+    if (fs.existsSync(bundled)) return bundled;
+  }
+  return process.platform === 'win32' ? 'node.exe' : 'node';
+}
+
+const NODE_BIN = findNodeBinary();
+
+// Prebuilt output locations. If these exist, we run them directly with the
+// bundled Node and skip npm/ts-node-dev entirely — this is the Bob-proof
+// path. If they don't exist (your own dev checkout), we fall back to the
+// original npm-based dev scripts further below.
+const BACKEND_DIST = path.join(BACKEND_DIR, 'dist', 'index.js');
+const FRONTEND_STANDALONE = path.join(FRONTEND_DIR, '.next', 'standalone', 'server.js');
+
 let mainWindow;
 let backendProc = null;
 let frontendProc = null;
@@ -60,7 +85,7 @@ function sendStatus() {
 function runNpm(args, cwd, label) {
   return new Promise((resolve, reject) => {
     const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const proc = spawn(npmCmd, args, { cwd, shell: true });
+    const proc = spawn(npmCmd, args, { cwd, shell: process.platform === 'win32', detached: process.platform !== 'win32' });
 
     proc.stdout.on('data', (d) => sendLog(label, d.toString()));
     proc.stderr.on('data', (d) => sendLog(label, d.toString()));
@@ -83,13 +108,13 @@ function killTree(proc) {
   if (process.platform === 'win32') {
     spawn('taskkill', ['/pid', String(proc.pid), '/f', '/t']);
   } else {
-    proc.kill();
+    try { process.kill(-proc.pid, 'SIGTERM'); } catch { try { proc.kill(); } catch {} }
   }
 }
 
 function spawnPersistent(args, cwd, label) {
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const proc = spawn(npmCmd, args, { cwd, shell: true });
+  const proc = spawn(npmCmd, args, { cwd, shell: process.platform === 'win32', detached: process.platform !== 'win32' });
   proc.stdout.on('data', (d) => sendLog(label, d.toString()));
   proc.stderr.on('data', (d) => sendLog(label, d.toString()));
   proc.on('close', (code) => {
@@ -99,6 +124,50 @@ function spawnPersistent(args, cwd, label) {
     sendStatus();
   });
   return proc;
+}
+
+// Runs a prebuilt Node entry point directly (no npm, no shell). Used for the
+// Bob-proof path: bundled node.exe + compiled backend/standalone frontend.
+function spawnNodeDirect(entryFile, cwd, label, extraEnv) {
+  const proc = spawn(NODE_BIN, [entryFile], {
+    cwd,
+    shell: false,
+    detached: process.platform !== 'win32',
+    env: { ...process.env, ...extraEnv },
+  });
+  proc.stdout.on('data', (d) => sendLog(label, d.toString()));
+  proc.stderr.on('data', (d) => sendLog(label, d.toString()));
+  proc.on('close', (code) => {
+    sendLog(label, `\n[process exited with code ${code}]\n`);
+    if (label === 'backend') backendProc = null;
+    if (label === 'frontend') frontendProc = null;
+    sendStatus();
+  });
+  return proc;
+}
+
+// Picks prebuilt-and-bundled path when available, otherwise falls back to
+// the original npm dev scripts (your own checkout without a build step run).
+function spawnBackend() {
+  if (fs.existsSync(BACKEND_DIST)) {
+    sendLog('system', 'Starting backend (prebuilt)...\n');
+    return spawnNodeDirect(BACKEND_DIST, BACKEND_DIR, 'backend');
+  }
+  sendLog('system', 'Starting backend (dev mode via ts-node-dev)...\n');
+  return spawnPersistent(['run', 'dev'], BACKEND_DIR, 'backend');
+}
+
+function spawnFrontend() {
+  if (fs.existsSync(FRONTEND_STANDALONE)) {
+    sendLog('system', 'Starting frontend (prebuilt standalone)...\n');
+    // Standalone server.js reads host/port from env vars, not CLI flags.
+    return spawnNodeDirect(FRONTEND_STANDALONE, path.dirname(FRONTEND_STANDALONE), 'frontend', {
+      HOSTNAME: '127.0.0.1',
+      PORT: '3002',
+    });
+  }
+  sendLog('system', 'Starting frontend (dev mode via next start)...\n');
+  return spawnPersistent(['run', 'start'], FRONTEND_DIR, 'frontend');
 }
 
 // ── IPC handlers ─────────────────────────────────────────────────────────
@@ -111,12 +180,10 @@ ipcMain.handle('start-dashboard', async () => {
     sendLog('system', 'Dashboard already running.\n');
     return;
   }
-  sendLog('system', 'Starting backend...\n');
-  backendProc = spawnPersistent(['run', 'dev'], BACKEND_DIR, 'backend');
+  backendProc = spawnBackend();
   sendStatus();
 
-  sendLog('system', 'Starting frontend...\n');
-  frontendProc = spawnPersistent(['run', 'start'], FRONTEND_DIR, 'frontend');
+  frontendProc = spawnFrontend();
   sendStatus();
 
   // Give it a moment then open the browser
@@ -156,11 +223,22 @@ ipcMain.handle('get-status', () => ({
 }));
 
 ipcMain.handle('check-first-run', () => {
-  const configPath = path.join(BACKEND_DIR, 'src', 'config.ts');
+  // config.json lives at the backend project root (see setup.ts) - not in
+  // src/ (never existed there) or dist/ (would get wiped by every rebuild).
+  const configPath = path.join(BACKEND_DIR, 'config.json');
+
+  // A Bob-proof build ships dist/index.js and .next/standalone/server.js
+  // already built — nothing to install, ever. Only fall back to checking
+  // node_modules (the old dev-mode signal) if those prebuilt outputs are
+  // absent, i.e. this is a raw source checkout.
+  const isPrebuilt = fs.existsSync(BACKEND_DIST) && fs.existsSync(FRONTEND_STANDALONE);
   const nodeModulesBackend = path.join(BACKEND_DIR, 'node_modules');
   const nodeModulesFrontend = path.join(FRONTEND_DIR, 'node_modules');
+
   return {
-    needsInstall: !fs.existsSync(nodeModulesBackend) || !fs.existsSync(nodeModulesFrontend),
+    needsInstall: isPrebuilt
+      ? false
+      : !fs.existsSync(nodeModulesBackend) || !fs.existsSync(nodeModulesFrontend),
     needsConfig: !fs.existsSync(configPath),
   };
 });
@@ -188,9 +266,10 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  mainWindow.loadFile('index.html');
+  mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.webContents.once('did-finish-load', () => {
     sendLog('system', `Project root: ${PROJECT_ROOT}${looksLikeProjectRoot(PROJECT_ROOT) ? ' (found ✓)' : ' (backend/frontend NOT found here)'}\n`);
+    sendLog('system', `Node runtime: ${NODE_BIN}\n`);
   });
 }
 

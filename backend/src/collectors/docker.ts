@@ -1,6 +1,6 @@
 import Docker from 'dockerode';
 
-const docker = new Docker({ socketPath: '//./pipe/docker_engine' });
+const docker = new Docker({ socketPath: process.env.DOCKER_SOCKET || (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock') });
 
 export interface ContainerStat {
   name: string;
@@ -11,9 +11,13 @@ export interface ContainerStat {
   status: string;
 }
 
+let dockerUnavailable = false;
+
 export async function getDockerStats(): Promise<ContainerStat[]> {
   try {
     const containers = await docker.listContainers();
+    if (dockerUnavailable) console.log('Docker is available again.');
+    dockerUnavailable = false;
 
     const statsPromises = containers.map(async (container) => {
       const instance = docker.getContainer(container.Id);
@@ -40,7 +44,8 @@ export async function getDockerStats(): Promise<ContainerStat[]> {
 
     return await Promise.all(statsPromises);
   } catch (error) {
-    console.error('Error fetching Docker stats:', error);
+    if (!dockerUnavailable) console.warn('Docker unavailable; will retry automatically.');
+    dockerUnavailable = true;
     return [];
   }
 }
