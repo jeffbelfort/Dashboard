@@ -1,6 +1,7 @@
 import https from 'https';
 import http from 'http';
-import { config } from '../config';
+import { loadConfig } from '../setup';
+const config = loadConfig();
 
 export interface SpotifyTrack {
   isPlaying: boolean;

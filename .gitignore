@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 .next/
 *.db
 dist/
@@ -13,3 +13,8 @@ backend/events.jsonl
 
 backend/peak_events.tbl
 backend/peak_events.tbl.meta.json
+
+# Local runtime configuration and Python caches
+backend/config.json
+__pycache__/
+*.pyc

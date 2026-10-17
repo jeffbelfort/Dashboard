@@ -49,14 +49,30 @@ export function recordIfPeak(metricName: 'cpu_temp' | 'gpu_temp' | 'cpu_load' | 
 
 export function getPeaksTable(): Table { return peakTable; }
 
-export function getTopPeaks(metricName: string, n: number = 10): Row[] {
+// Row's index signature is number-only (matches the generic engine's typed
+// columns), so it can't hold the metricName string label we attach here.
+// A dedicated interface for the augmented result avoids fighting that
+// constraint instead of working around it with a cast.
+export interface PeakRow {
+  ts: number;
+  metric: number;
+  value: number;
+  metricName: string;
+}
+
+export function getTopPeaks(metricName: string, n: number = 10): PeakRow[] {
   // Filter by metric first (full scan — this table is small/sparse by design),
   // then take the top N of that filtered set.
   const all = peakTable.query(`metric == ${METRIC_IDS[metricName] ?? -1}`, 100000);
   return all.rows
     .sort((a, b) => (b.value as number) - (a.value as number))
     .slice(0, n)
-    .map(r => ({ ...r, metricName }));
+    .map(r => ({
+      ts: r.ts as number,
+      metric: r.metric as number,
+      value: r.value as number,
+      metricName,
+    }));
 }
 
 export function getRunningMaxes(): Record<string, number | undefined> {

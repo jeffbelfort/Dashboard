@@ -2,15 +2,10 @@ import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import https from 'https';
 import fs from 'fs';
-import { configExists, writeConfig, SetupPayload } from './setup';
+import { configExists, writeConfig, loadConfig, SetupPayload } from './setup';
 
 // ── Config loading ─────────────────────────────────────────────────────────
-let config: any;
-try {
-  config = require('./config').config;
-} catch {
-  config = require('./config.template').config;
-}
+const config: any = loadConfig();
 
 const IS_SETUP = !configExists();
 
@@ -480,7 +475,7 @@ async function collectAndBroadcast() {
   }
 
   // Log alert state transitions (only on change, not every tick)
-  const currentAlertTypes = new Set(metrics.alerts.map((a: Alert) => a.type));
+  const currentAlertTypes = new Set<string>(metrics.alerts.map((a: Alert) => a.type));
   for (const a of metrics.alerts) {
     if (!prevAlertTypes.has(a.type)) logEvent?.('alert_fired', a.message);
   }

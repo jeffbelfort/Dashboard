@@ -37,6 +37,10 @@ interface HwinfoData {
     pchTemp: number | null;
   };
   gpu: {
+    model?: string | null;
+    memUsed?: number | null;
+    memTotal?: number | null;
+    powerLimit?: number | null;
     temp: number | null;
     memJunctionTemp: number | null;
     load: number | null;
@@ -117,7 +121,7 @@ const WIDGET_META: Record<WidgetKey, { label: string; accent: string }> = {
   spotify:  { label: 'SPOTIFY',    accent: C.cyan },
   temps:    { label: 'TEMPS & FANS', accent: C.red },
   alerts:   { label: 'ALERTS',     accent: C.red },
-  hwinfo:   { label: 'HWINFO',      accent: C.cyan },
+  hwinfo:   { label: 'SENSORS',      accent: C.cyan },
   eventLog: { label: 'EVENT LOG',   accent: C.amber },
   dailyCompare: { label: 'TODAY VS 7D AVG', accent: C.purple },
   dayCompare: { label: 'DAY VS DAY', accent: C.cyan },
@@ -1026,15 +1030,26 @@ function DayCompareContent() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('http://127.0.0.1:3001/history/days')
-      .then(r => r.json())
-      .then((d: DayOption[]) => {
-        setDays(d);
-        if (d.length > 0) setDateA(d[0].date);
-        if (d.length > 1) setDateB(d[1].date);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    const fetchDays = () => {
+      fetch('http://127.0.0.1:3001/history/days')
+        .then(r => r.json())
+        .then((d: DayOption[]) => {
+          setDays(d);
+          // Only set defaults if nothing's been picked yet - avoids yanking
+          // the user's selection out from under them on every poll tick.
+          setDateA(prev => prev || (d.length > 0 ? d[0].date : ''));
+          setDateB(prev => prev || (d.length > 1 ? d[1].date : ''));
+          setLoading(false);
+        })
+        .catch(() => setLoading(false));
+    };
+    fetchDays();
+    // Re-check periodically - a single fetch-on-mount can catch the backend
+    // in a transient state right after a restart (e.g. index cache still
+    // settling) and would otherwise get stuck showing "not enough data"
+    // until something forces a remount.
+    const interval = setInterval(fetchDays, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -1107,7 +1122,7 @@ function coreShortLabel(label: string): string {
 function CpuClocksContent({ data }: { data: HwinfoData | null }) {
   if (!data || !data.available || !data.cpu.coreClocks?.length) return (
     <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
-      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO CLOCK DATA — REQUIRES HWINFO</div>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO CLOCK DATA — SENSOR NOT AVAILABLE</div>
     </div>
   );
 
@@ -1139,7 +1154,7 @@ function CpuClocksContent({ data }: { data: HwinfoData | null }) {
 function CpuVoltagesContent({ data }: { data: HwinfoData | null }) {
   if (!data || !data.available || !data.cpu.coreVids?.length) return (
     <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
-      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO VOLTAGE DATA — REQUIRES HWINFO</div>
+      <div style={{ fontSize:'9px', color:C.greenMuted, fontFamily:'monospace' }}>NO VOLTAGE DATA — SENSOR NOT AVAILABLE</div>
     </div>
   );
 
@@ -1212,8 +1227,8 @@ function EffectiveClockContent({ data }: { data: HwinfoData | null }) {
 function HwinfoContent({ data }: { data: HwinfoData | null }) {
   if (!data || !data.available) return (
     <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100%', gap:'8px' }}>
-      <div style={{ fontSize:'10px', color:C.greenMuted, fontFamily:'monospace', textAlign:'center' }}>HWINFO NOT CONNECTED</div>
-      <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', textAlign:'center' }}>Enable Shared Memory Support in HWiNFO settings</div>
+      <div style={{ fontSize:'10px', color:C.greenMuted, fontFamily:'monospace', textAlign:'center' }}>SENSORS NOT AVAILABLE</div>
+      <div style={{ fontSize:'8px', color:C.textMuted, fontFamily:'monospace', textAlign:'center' }}>Check the sensor reader; Windows uses HWiNFO, Linux uses sensors and NVIDIA tools</div>
     </div>
   );
   return (
@@ -1578,14 +1593,14 @@ export default function Dashboard() {
       case 'cpuGraph': return <CpuGraphContentM history={history}/>;
       case 'memory':   return <MemContentM data={metrics?.mem??null}/>;
       case 'memGraph': return <MemGraphContentM history={history}/>;
-      case 'gpu':      return <GpuContentM data={metrics?.hwinfo?.available ? {model:'RTX 5070',load:metrics.hwinfo.gpu.load??0,memUsed:0,memTotal:0,memPercent:metrics.hwinfo.gpu.memUsagePct??0,temp:metrics.hwinfo.gpu.temp??0,powerDraw:metrics.hwinfo.gpu.power??null,powerLimit:250} : null}/>;
+      case 'gpu':      return <GpuContentM data={metrics?.hwinfo?.available && metrics.hwinfo.gpu.load != null && metrics.hwinfo.gpu.temp != null ? {model:metrics.hwinfo.gpu.model??'GPU',load:metrics.hwinfo.gpu.load??0,memUsed:metrics.hwinfo.gpu.memUsed??0,memTotal:metrics.hwinfo.gpu.memTotal??0,memPercent:metrics.hwinfo.gpu.memUsagePct??0,temp:metrics.hwinfo.gpu.temp??0,powerDraw:metrics.hwinfo.gpu.power??null,powerLimit:metrics.hwinfo.gpu.powerLimit??null} : null}/>;
       case 'gpuGraph': return <GpuGraphContentM history={history}/>;
       case 'disk':     return <DiskContentM data={metrics?.disk??[]}/>;
       case 'processes':return <ProcessContentM data={metrics?.processes??[]}/>;
       case 'network':  return <NetworkContentM data={metrics?.network??null}/>;
       case 'docker':   return <DockerContentM data={metrics?.docker??null}/>;
       case 'spotify':  return <SpotifyContentM data={metrics?.spotify??null} onSendMessage={sendMessage}/>;
-      case 'temps':    return <TempsContentM cpuTemp={metrics?.cpuTemp ?? {main:null,cores:[],max:null}} fans={metrics?.fans??[]} gpu={metrics?.hwinfo?.available ? {model:'RTX 5070',load:metrics.hwinfo.gpu.load??0,memUsed:0,memTotal:0,memPercent:metrics.hwinfo.gpu.memUsagePct??0,temp:metrics.hwinfo.gpu.temp??0,powerDraw:metrics.hwinfo.gpu.power??null,powerLimit:250} : null}/>;
+      case 'temps':    return <TempsContentM cpuTemp={metrics?.cpuTemp ?? {main:null,cores:[],max:null}} fans={metrics?.fans??[]} gpu={metrics?.hwinfo?.available && metrics.hwinfo.gpu.load != null && metrics.hwinfo.gpu.temp != null ? {model:metrics.hwinfo.gpu.model??'GPU',load:metrics.hwinfo.gpu.load??0,memUsed:metrics.hwinfo.gpu.memUsed??0,memTotal:metrics.hwinfo.gpu.memTotal??0,memPercent:metrics.hwinfo.gpu.memUsagePct??0,temp:metrics.hwinfo.gpu.temp??0,powerDraw:metrics.hwinfo.gpu.power??null,powerLimit:metrics.hwinfo.gpu.powerLimit??null} : null}/>;
       case 'alerts':   return <AlertsContentM alerts={metrics?.alerts??[]}/>
       case 'hwinfo':   return <HwinfoContentM data={metrics?.hwinfo??null}/>;
       case 'cpuClocks': return <CpuClocksContentM data={metrics?.hwinfo??null}/>;
